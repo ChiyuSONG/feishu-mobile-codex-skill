@@ -26,7 +26,7 @@ Reuse one verified compatible app for additional groups whenever possible. Creat
 ## User Experience
 
 - Bind by stable `chat_id -> canonical working_directory -> persistent Codex thread_id`. The Feishu group name is display text only and may be renamed safely.
-- Let the user send consecutive messages without waiting. Preserve each Feishu `message_id`, process durably and idempotently, and serialize work per group.
+- Let the user send consecutive messages without waiting. Preserve each Feishu `message_id`, process durably and idempotently, and serialize work per group. Explain that a short queued burst may be combined into one complete response; a leading `*` forces that message to be processed alone and is removed before Codex sees the request.
 - Leave messages in Feishu while the computer is offline. Reconcile them when the Listener reconnects or automatic inspection runs.
 - Reply directly for simple results. Send explicitly linked in-project images as native Feishu image replies and explicitly linked PDF/Excel deliverables as native Feishu file replies; use the bundled private Feishu publisher for long or structured results and fallback artifact links, then send a concise group summary and link. If publication, attachment delivery, or privacy hardening fails, keep the text result and state the artifact failure instead of silently dropping it.
 - Keep normal interaction in natural language. Internal `/doc` and `/direct` overrides may remain available for diagnosis, but do not make users learn them.

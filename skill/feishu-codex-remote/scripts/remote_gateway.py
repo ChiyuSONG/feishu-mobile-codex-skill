@@ -816,7 +816,8 @@ def welcome_message(project: dict[str, Any]) -> str:
         return (
             "**Connected — you can start now**\n\n"
             f"{binding}\n\n"
-            "- Send tasks consecutively; offline messages stay in Feishu and are processed in order later\n"
+            "- Send tasks consecutively; queued messages may be combined, or start one with `*` to handle it separately\n"
+            "- Offline messages stay in Feishu and are processed in order later\n"
             "- Simple results reply directly; complex results can use private Feishu documents\n"
             "- Say “remind me every hour starting tomorrow at 10” or “done, cancel the reminder”\n\n"
             f"{inspection}\n"
@@ -836,7 +837,8 @@ def welcome_message(project: dict[str, Any]) -> str:
     return (
         "**已连接，可以直接使用**\n\n"
         f"{binding}\n\n"
-        "- 直接连续发送任务；电脑离线时消息留在飞书，上线后按顺序处理\n"
+        "- 直接连续发送任务；积压消息可能合并处理，必须单独处理时在开头加 `*`\n"
+        "- 电脑离线时消息留在飞书，上线后按顺序处理\n"
         "- 简单结果直接回复，复杂结果可生成私有飞书文档\n"
         "- 直接说“从明天 10 点开始每小时提醒我……”或“已完成，取消提醒”\n\n"
         f"{inspection}\n"

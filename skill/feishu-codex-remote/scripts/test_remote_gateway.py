@@ -370,6 +370,16 @@ class RoutingTests(unittest.TestCase):
         self.assertIn("om_2", text)
         self.assertIn("第二条", text)
 
+    def test_welcome_explains_forced_single_message_marker(self):
+        zh = remote_gateway.welcome_message(
+            {"working_directory": "C:/work/demo", "language": "zh", "hourly_catch_up_enabled": True}
+        )
+        en = remote_gateway.welcome_message(
+            {"working_directory": "C:/work/demo", "language": "en", "hourly_catch_up_enabled": True}
+        )
+        self.assertIn("开头加 `*`", zh)
+        self.assertIn("start one with `*`", en)
+
     def test_resume_images_are_scoped_to_resume_subcommand(self):
         with patch.object(remote_gateway, "codex_cli_path", return_value=Path("codex.exe")):
             command = remote_gateway.build_codex_command(

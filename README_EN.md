@@ -65,6 +65,8 @@ Send messages just as you normally talk to Codex:
 
 You can continue sending messages while a task is running; new messages wait in the queue. Tasks do not run while the computer or Codex is closed, but messages are not lost. Processing continues after Codex opens again.
 
+Consecutive messages sent while another task is running may be combined into one processing turn, while every request is still preserved. If one message must be handled separately, start it with `*`, for example: `* Handle this message separately; do not combine it with the previous requests.`
+
 ## What automatic inspection does
 
 While the computer and Codex are running, automatic inspection runs once per hour by default. It confirms that the connection is healthy, finds missed or pending messages, and reports Codex usage. Inspection does not run while the computer or Codex is closed.

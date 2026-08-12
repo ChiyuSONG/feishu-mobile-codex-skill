@@ -4,7 +4,7 @@
 
 Turn Feishu into a mobile entrance to your local Codex.
 
-Send tasks to Codex from Feishu at any time without staying at your computer or waiting for the previous task to finish. Messages remain in Feishu while the computer is offline, and Codex continues processing them in order the next time it opens.
+Send tasks to Codex continuously from Feishu without waiting for the previous task to finish. The computer and Codex must remain running for tasks to execute and return results. When either is closed, Feishu can still receive new messages and keep them pending; Codex processes them in order after it opens again.
 
 ## What it can do for you
 
@@ -63,7 +63,7 @@ You can continue sending messages while a task is running; new messages wait in 
 
 ## What automatic inspection does
 
-Automatic inspection runs once per hour by default. It confirms that the connection is healthy, finds missed or pending messages, and reports Codex usage.
+While the computer and Codex are running, automatic inspection runs once per hour by default. It confirms that the connection is healthy, finds missed or pending messages, and reports Codex usage. Inspection does not run while the computer or Codex is closed.
 
 The first inspection explains its purpose. Later, unless you change it, the report briefly tells you:
 
@@ -90,9 +90,9 @@ These reminders depend on the computer, Codex, and automatic inspection; they ar
 
 ## Frequently asked questions
 
-### Does the computer need to stay on?
+### Do the computer and Codex need to stay on?
 
-No. You can keep sending messages in Feishu while the computer is off, but tasks wait until the computer and Codex are running again.
+Yes, if you want tasks to be processed promptly. The computer must be on and Codex must be running. When either is closed, Feishu still receives new messages and keeps them pending, but no task executes until Codex opens again.
 
 ### Does renaming the Feishu group break the connection?
 

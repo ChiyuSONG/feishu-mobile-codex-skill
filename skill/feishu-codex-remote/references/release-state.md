@@ -63,7 +63,7 @@ Generalize the proven reminder interaction without importing project-specific he
 | Capability | Current state |
 | --- | --- |
 | Durable ordered Feishu inbox, offline recovery, persistent Codex thread | Implemented and covered by deterministic tests |
-| Direct Feishu replies and private-document routing | Implemented; the bundled publisher uses the same OS credential boundary |
+| Direct Feishu replies and private-document routing | Implemented; local images/files are inserted through native Docx blocks and read back, with a private-file fallback when a legacy app lacks Docx permission |
 | One-prompt installer | Skill workflow and runtime bootstrap implemented; real clean-machine/CUA onboarding not yet accepted |
 | QR/login-based Feishu authorization | Browser OAuth with a localhost callback is implemented and can use Feishu's QR login when offered; real clean-account testing remains |
 | CUA/browser-assisted Feishu console setup | Procedure defined; real console navigation not yet accepted |

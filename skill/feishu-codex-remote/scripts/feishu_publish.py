@@ -11,6 +11,7 @@ import json
 import mimetypes
 import os
 from pathlib import Path
+import re
 import secrets
 import shutil
 import subprocess
@@ -44,10 +45,12 @@ TOKENS_PATH = STATE_DIR / "tokens.bin"
 HISTORY_PATH = STATE_DIR / "history.jsonl"
 DEFAULT_REDIRECT = "http://127.0.0.1:17321/callback"
 DEFAULT_FOLDER = "Codex 移动预览"
-DEFAULT_SCOPES = "drive:drive offline_access"
+DEFAULT_SCOPES = "drive:drive docx:document offline_access"
 MAX_SIMPLE_UPLOAD = 20 * 1024 * 1024
 SENSITIVE_NAMES = {".env", ".npmrc", ".pypirc", "id_rsa", "id_ed25519", "credentials.json"}
 SENSITIVE_SUFFIXES = {".key", ".pem", ".pfx", ".p12"}
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+MARKDOWN_LINK_RE = re.compile(r"(!?)\[[^\]\r\n]*\]\(\s*(?:<([^>\r\n]+)>|([^\s)]+))[^)]*\)")
 
 
 class PublishError(RuntimeError):
@@ -316,6 +319,14 @@ def assert_personal_tenant(config: dict, info: dict) -> None:
         raise PublishError(f"Wrong Feishu tenant: expected {expected}, got {actual}. Refusing to continue.")
 
 
+def effective_scopes(config: dict) -> str:
+    ordered: list[str] = []
+    for scope in (str(config.get("scopes") or "") + " " + DEFAULT_SCOPES).split():
+        if scope not in ordered:
+            ordered.append(scope)
+    return " ".join(ordered)
+
+
 def authenticate(args: argparse.Namespace) -> dict:
     config = load_config()
     if not protected_exists(SECRET_PATH):
@@ -361,7 +372,7 @@ def authenticate(args: argparse.Namespace) -> dict:
     query = urllib.parse.urlencode({
         "client_id": config["app_id"],
         "redirect_uri": config["redirect_uri"],
-        "scope": config["scopes"],
+        "scope": effective_scopes(config),
         "state": state,
     })
     auth_url = f"{AUTH_BASE}?{query}"
@@ -463,14 +474,46 @@ def assert_source_safe(path: Path, allow_sensitive: bool) -> None:
         raise PublishError(f"Empty files cannot be uploaded: {path}")
 
 
-def convert_for_reading(source: Path, title: str, temp_dir: Path) -> Path:
+def markdown_without_local_artifacts(source: Path, artifacts: list[Path], temp_dir: Path) -> Path:
+    if source.suffix.lower() not in {".md", ".markdown", ".mark"} or not artifacts:
+        return source
+    expected = {os.path.normcase(str(path.resolve())): path for path in artifacts}
+    text = source.read_text(encoding="utf-8", errors="replace")
+
+    def replace(match: re.Match[str]) -> str:
+        raw = urllib.parse.unquote((match.group(2) or match.group(3) or "").strip())
+        if raw.startswith(("http://", "https://", "data:", "mailto:")):
+            return match.group(0)
+        if raw.startswith("file:///"):
+            raw = raw[8:]
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            candidate = source.parent / candidate
+        try:
+            key = os.path.normcase(str(candidate.resolve(strict=True)))
+        except (FileNotFoundError, OSError):
+            return match.group(0)
+        artifact = expected.get(key)
+        if not artifact:
+            return match.group(0)
+        label = "Image" if match.group(1) else "Attachment"
+        return f"[{label}: {artifact.name} -- available below or from the Feishu reply]"
+
+    prepared = temp_dir / f"source-with-artifact-placeholders{source.suffix.lower()}"
+    prepared.write_text(MARKDOWN_LINK_RE.sub(replace, text), encoding="utf-8")
+    return prepared
+
+
+def convert_for_reading(source: Path, title: str, temp_dir: Path, artifacts: list[Path] | None = None) -> Path:
     if source.suffix.lower() not in {".md", ".markdown", ".mark", ".html", ".htm", ".txt"}:
         return source
     pandoc = shutil.which("pandoc")
     if not pandoc:
         raise PublishError("Pandoc is required to convert Markdown/HTML/text into a mobile-readable Feishu document")
+    original_parent = source.parent
+    source = markdown_without_local_artifacts(source, artifacts or [], temp_dir)
     output = temp_dir / f"{sanitize_title(title)}.docx"
-    cmd = [pandoc, str(source), "-o", str(output), "--metadata", f"title={title}", "--resource-path", str(source.parent)]
+    cmd = [pandoc, str(source), "-o", str(output), "--metadata", f"title={title}", "--resource-path", str(original_parent)]
     completed = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
     if completed.returncode != 0:
         raise PublishError(f"Pandoc conversion failed: {completed.stderr.strip()}")
@@ -550,6 +593,106 @@ def upload_regular_file(token: str, source: Path, folder_token: str) -> dict:
     return {"file_token": file_token, "url": f"https://www.feishu.cn/file/{file_token}"}
 
 
+def list_document_blocks(token: str, document_id: str) -> list[dict]:
+    items: list[dict] = []
+    page_token = ""
+    while True:
+        query = {"page_size": 500}
+        if page_token:
+            query["page_token"] = page_token
+        payload = request_json(
+            "GET",
+            f"{API_BASE}/docx/v1/documents/{urllib.parse.quote(document_id, safe='')}/blocks?{urllib.parse.urlencode(query)}",
+            token=token,
+        )
+        data = payload.get("data") or {}
+        items.extend(data.get("items") or [])
+        if not data.get("has_more"):
+            return items
+        page_token = str(data.get("page_token") or "")
+
+
+def document_root_child_count(token: str, document_id: str) -> int:
+    root = next((item for item in list_document_blocks(token, document_id) if item.get("block_id") == document_id), None)
+    if not root:
+        raise PublishError(f"Feishu document {document_id} returned no root block")
+    return len(root.get("children") or [])
+
+
+def create_media_block(token: str, document_id: str, media_type: str) -> str:
+    block_type = 27 if media_type == "image" else 23
+    block_data = {"image": {}} if media_type == "image" else {"file": {"token": ""}}
+    result = request_json(
+        "POST",
+        f"{API_BASE}/docx/v1/documents/{urllib.parse.quote(document_id, safe='')}/blocks/{urllib.parse.quote(document_id, safe='')}/children?document_revision_id=-1",
+        token=token,
+        body={"index": document_root_child_count(token, document_id), "children": [{"block_type": block_type, **block_data}]},
+    )
+    children = (result.get("data") or {}).get("children") or []
+    if media_type == "image":
+        block = next((item for item in children if item.get("block_type") == 27), None)
+        block_id = str((block or {}).get("block_id") or "")
+    else:
+        view = next((item for item in children if item.get("block_type") == 33), None)
+        block_id = str(((view or {}).get("children") or [""])[0])
+    if not block_id:
+        raise PublishError(f"Feishu did not return the new {media_type} block ID")
+    return block_id
+
+
+def upload_document_media(token: str, source: Path, block_id: str, media_type: str) -> str:
+    fields = {
+        "file_name": source.name,
+        "parent_type": "docx_image" if media_type == "image" else "docx_file",
+        "parent_node": block_id,
+        "size": str(source.stat().st_size),
+    }
+    if source.stat().st_size <= MAX_SIMPLE_UPLOAD:
+        payload = upload_multipart(f"{API_BASE}/drive/v1/medias/upload_all", token, fields, source)
+    else:
+        payload = upload_in_parts(
+            f"{API_BASE}/drive/v1/medias",
+            token,
+            source,
+            {**fields, "size": source.stat().st_size},
+        )
+    file_token = str((payload.get("data") or {}).get("file_token") or "")
+    if not file_token:
+        raise PublishError(f"Feishu {media_type} upload returned no file_token")
+    return file_token
+
+
+def embed_document_artifact(token: str, document_id: str, source: Path) -> dict:
+    media_type = "image" if source.suffix.lower() in IMAGE_SUFFIXES else "file"
+    block_id = create_media_block(token, document_id, media_type)
+    file_token = upload_document_media(token, source, block_id, media_type)
+    operation = "replace_image" if media_type == "image" else "replace_file"
+    request_json(
+        "PATCH",
+        f"{API_BASE}/docx/v1/documents/{urllib.parse.quote(document_id, safe='')}/blocks/{urllib.parse.quote(block_id, safe='')}?document_revision_id=-1",
+        token=token,
+        body={operation: {"token": file_token}},
+    )
+    verified = request_json(
+        "GET",
+        f"{API_BASE}/docx/v1/documents/{urllib.parse.quote(document_id, safe='')}/blocks/{urllib.parse.quote(block_id, safe='')}",
+        token=token,
+    )
+    block = (verified.get("data") or {}).get("block") or verified.get("data") or {}
+    actual = str(((block.get(media_type) or {}).get("token")) or "")
+    if actual != file_token:
+        raise PublishError(f"Feishu {media_type} block verification failed for {source.name}")
+    return {
+        "source": str(source),
+        "name": source.name,
+        "mode": "embedded",
+        "media_type": media_type,
+        "block_id": block_id,
+        "file_token": file_token,
+        "verified": True,
+    }
+
+
 def harden_link_permissions(token: str, file_token: str, file_type: str) -> dict:
     url = f"{API_BASE}/drive/v1/permissions/{file_token}/public?type={file_type}"
     request_json(
@@ -574,7 +717,8 @@ def harden_link_permissions(token: str, file_token: str, file_type: str) -> dict
 def publish(args: argparse.Namespace) -> dict:
     token, config, info = access_token()
     sources = [Path(value).expanduser().resolve() for value in args.source]
-    for source in sources:
+    embed_sources = [Path(value).expanduser().resolve() for value in (args.embed or [])]
+    for source in [*sources, *embed_sources]:
         assert_source_safe(source, args.allow_sensitive)
     root_token, root_url = ensure_folder(token, config.get("root_folder_name", DEFAULT_FOLDER))
     if args.folder_token:
@@ -586,11 +730,12 @@ def publish(args: argparse.Namespace) -> dict:
         stamp = time.strftime("%Y-%m-%d %H%M")
         target_token, target_url = ensure_folder(token, f"{stamp} {sanitize_title(args.title)}", root_token)
     items = []
+    embedded_artifacts: list[dict] = []
     with tempfile.TemporaryDirectory(prefix="codex-feishu-") as temp:
         temp_dir = Path(temp)
         for index, source in enumerate(sources, start=1):
             item_title = args.title if len(sources) == 1 else f"{args.title} - {index:02d} {source.stem}"
-            prepared = convert_for_reading(source, item_title, temp_dir)
+            prepared = convert_for_reading(source, item_title, temp_dir, embed_sources if index == 1 else [])
             if prepared.suffix.lower() in {".docx", ".doc", ".md", ".markdown", ".mark", ".html", ".htm", ".txt"}:
                 result = upload_import_source(token, prepared, item_title, target_token)
                 kind = "docx"
@@ -602,6 +747,29 @@ def publish(args: argparse.Namespace) -> dict:
                 raise PublishError(f"Published {kind} returned no remote token")
             result["permission"] = harden_link_permissions(token, remote_token, kind)
             items.append({"source": str(source), "kind": kind, **result})
+        doc_item = next((item for item in items if item.get("kind") == "docx"), None)
+        if embed_sources and not doc_item:
+            raise PublishError("Embedded artifacts require a published Feishu document")
+        document_id = str((doc_item or {}).get("token") or (doc_item or {}).get("file_token") or "")
+        for source in embed_sources:
+            try:
+                embedded_artifacts.append(embed_document_artifact(token, document_id, source))
+            except Exception as exc:
+                fallback = upload_regular_file(token, source, target_token)
+                remote_token = str(fallback.get("file_token") or "")
+                fallback["permission"] = harden_link_permissions(token, remote_token, "file")
+                item = {"source": str(source), "kind": "file", **fallback}
+                items.append(item)
+                embedded_artifacts.append({
+                    "source": str(source),
+                    "name": source.name,
+                    "mode": "separate_file",
+                    "media_type": "image" if source.suffix.lower() in IMAGE_SUFFIXES else "file",
+                    "file_token": remote_token,
+                    "url": str(fallback.get("url") or ""),
+                    "verified": True,
+                    "inline_error": str(exc)[:1000],
+                })
     visible = list_files(token, target_token)
     visible_tokens = {str(item.get("token")) for item in visible}
     for item in items:
@@ -614,6 +782,13 @@ def publish(args: argparse.Namespace) -> dict:
         "folder_url": target_url,
         "title": args.title,
         "items": items,
+        "embedded_artifacts": embedded_artifacts,
+        "content_validation": {
+            "expected_artifacts": len(embed_sources),
+            "embedded": sum(1 for item in embedded_artifacts if item.get("mode") == "embedded"),
+            "separate_files": sum(1 for item in embedded_artifacts if item.get("mode") == "separate_file"),
+            "delivered": len(embedded_artifacts) == len(embed_sources) and all(item.get("verified") for item in embedded_artifacts),
+        },
     }
     ensure_state_dir()
     with HISTORY_PATH.open("a", encoding="utf-8") as handle:
@@ -658,6 +833,7 @@ def build_parser() -> argparse.ArgumentParser:
     pub = sub.add_parser("publish", help="Publish selected local files")
     pub.add_argument("--title", required=True)
     pub.add_argument("--source", action="append", required=True)
+    pub.add_argument("--embed", action="append", help="Insert an image/file into the first published document; fall back to a private file link")
     pub.add_argument("--folder-token")
     pub.add_argument("--flat", action="store_true")
     pub.add_argument("--allow-sensitive", action="store_true", help="Use only after explicit user confirmation")

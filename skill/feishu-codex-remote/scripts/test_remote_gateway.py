@@ -509,6 +509,57 @@ class RoutingTests(unittest.TestCase):
         answer = "```python\na=1\n```\n\n```text\nok\n```"
         self.assertTrue(remote_gateway.should_publish_document("test", answer))
 
+    def test_extract_local_artifacts_only_accepts_explicit_files_inside_workspace(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw) / "project"
+            root.mkdir()
+            image = root / "preview image.png"
+            image.write_bytes(b"png")
+            report = root / "report.pdf"
+            report.write_bytes(b"pdf")
+            outside = Path(raw) / "private.pdf"
+            outside.write_bytes(b"private")
+            answer = (
+                f"![preview](<{image.as_posix()}>)\n"
+                "[report](report.pdf)\n"
+                f"[outside](<{outside.as_posix()}>)\n"
+                "[web](https://example.com/image.png)"
+            )
+            self.assertEqual(remote_gateway.extract_local_artifacts(answer, root), [image.resolve(), report.resolve()])
+
+    def test_document_reply_exposes_separate_artifact_fallback(self):
+        class Client:
+            def __init__(self):
+                self.text = ""
+
+            def reply_post(self, _message_id, markdown, _uuid):
+                self.text = markdown
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            image = root / "preview.png"
+            image.write_bytes(b"png")
+            answer = f"Result\n\n![preview](<{image.as_posix()}>)"
+            final_path = root / "final.md"
+            final_path.write_text(answer, encoding="utf-8")
+            client = Client()
+            published = {
+                "document_url": "https://example.feishu.cn/docx/doc_1",
+                "artifacts": [{"name": "preview.png", "url": "https://example.feishu.cn/file/file_1"}],
+            }
+            with patch.object(remote_gateway, "publish_document", return_value=published) as mocked:
+                link = remote_gateway.reply_complete(
+                    client,
+                    {"chat_id": "oc_1", "working_directory": str(root)},
+                    {"message_id": "om_1", "content": '{"text":"show image"}'},
+                    answer,
+                    final_path,
+                    root / "gateway.log",
+                )
+            self.assertEqual(link, published["document_url"])
+            self.assertIn("preview.png", client.text)
+            self.assertEqual(mocked.call_args.args[2], [image.resolve()])
+
     def test_chunks_preserve_content(self):
         text = "段落。" * 2000
         parts = remote_gateway.chunks(text, 300)

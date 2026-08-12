@@ -18,6 +18,7 @@ import threading
 import time
 import traceback
 from typing import Any
+import urllib.parse
 import uuid
 
 from reminders import due_reminders, mark_sent
@@ -692,6 +693,52 @@ def should_publish_document(source_text: str, answer: str) -> bool:
     return structural or media or len(answer) > 3500
 
 
+IMAGE_ARTIFACT_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+FILE_ARTIFACT_SUFFIXES = {
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".csv", ".tsv",
+    ".ppt", ".pptx", ".zip", ".txt", ".json",
+}
+MARKDOWN_LINK_RE = re.compile(r"(!?)\[[^\]\r\n]*\]\(\s*(?:<([^>\r\n]+)>|([^\s)]+))[^)]*\)")
+
+
+def extract_local_artifacts(answer: str, working_directory: str | Path) -> list[Path]:
+    """Return explicit Markdown-linked artifacts that are safe to publish.
+
+    Only existing files below the bound working directory are accepted. This
+    prevents an answer from turning an arbitrary local path into an upload.
+    """
+    root = Path(working_directory).expanduser().resolve()
+    artifacts: list[Path] = []
+    seen: set[str] = set()
+    for match in MARKDOWN_LINK_RE.finditer(answer):
+        is_image = bool(match.group(1))
+        raw = urllib.parse.unquote((match.group(2) or match.group(3) or "").strip())
+        if not raw or raw.startswith(("http://", "https://", "data:", "mailto:")):
+            continue
+        if raw.startswith("file:///"):
+            raw = raw[8:]
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        try:
+            candidate = candidate.resolve(strict=True)
+            candidate.relative_to(root)
+        except (FileNotFoundError, OSError, ValueError):
+            continue
+        suffix = candidate.suffix.lower()
+        if not candidate.is_file():
+            continue
+        if is_image and suffix not in IMAGE_ARTIFACT_SUFFIXES:
+            continue
+        if not is_image and suffix not in FILE_ARTIFACT_SUFFIXES:
+            continue
+        key = os.path.normcase(str(candidate))
+        if key not in seen:
+            seen.add(key)
+            artifacts.append(candidate)
+    return artifacts
+
+
 def chunks(text: str, limit: int = 3000) -> list[str]:
     result: list[str] = []
     rest = text.strip()
@@ -706,9 +753,11 @@ def chunks(text: str, limit: int = 3000) -> list[str]:
     return result
 
 
-def publish_document(project: dict[str, Any], source: Path) -> str:
+def publish_document(project: dict[str, Any], source: Path, artifacts: list[Path] | None = None) -> dict[str, Any]:
     title = f"{project.get('chat_name') or 'Codex 远程结果'} - {datetime.now().strftime('%Y-%m-%d %H%M')}"
     command = [sys.executable, str(PUBLISHER), "publish", "--title", title, "--source", str(source)]
+    for artifact in artifacts or []:
+        command.extend(["--embed", str(artifact)])
     result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600, check=False)
     if result.returncode != 0:
         raise GatewayError(f"Feishu document publish failed: {result.stdout}\n{result.stderr}")
@@ -732,7 +781,18 @@ def publish_document(project: dict[str, Any], source: Path) -> str:
         doc_links = [link for link in links if "/drive/" in link]
     if not doc_links:
         raise GatewayError(f"Publisher returned no Feishu link: {payload}")
-    return doc_links[0]
+    fallback_artifacts: list[dict[str, str]] = []
+    for artifact in payload.get("embedded_artifacts") or []:
+        if artifact.get("mode") == "separate_file" and artifact.get("url"):
+            fallback_artifacts.append({
+                "name": str(artifact.get("name") or "artifact"),
+                "url": str(artifact["url"]),
+            })
+    return {
+        "document_url": doc_links[0],
+        "artifacts": fallback_artifacts,
+        "content_validation": payload.get("content_validation") or {},
+    }
 
 
 def welcome_message(project: dict[str, Any]) -> str:
@@ -960,18 +1020,32 @@ def reply_complete(
     message_id = item["message_id"]
     base_uuid = "codex-remote-" + hashlib.sha256(message_id.encode("utf-8")).hexdigest()[:32]
     if should_publish_document(source, answer):
+        artifacts = extract_local_artifacts(answer, project.get("working_directory") or final_path.parent)
         try:
-            link = publish_document(project, final_path)
+            published = publish_document(project, final_path, artifacts)
+            link = str(published["document_url"])
             english = project_language(project) == "en"
             fallback = "The complete result is ready" if english else "完整结果已整理"
             label = "Open the full Feishu document" if english else "打开完整飞书文档"
             summary = next((line.strip("# ") for line in answer.splitlines() if line.strip()), fallback)
             text = f"{summary[:240]}\n\n[{label}]({link})"
+            fallback_artifacts = published.get("artifacts") or []
+            if fallback_artifacts:
+                artifact_label = "Attachments" if english else "附件与产物"
+                lines = [f"[{item['name']}]({item['url']})" for item in fallback_artifacts]
+                text += f"\n\n{artifact_label}：" + " · ".join(lines)
             client.reply_post(message_id, text, base_uuid)
             return link
         except Exception:
             append_log(log_path, "document publish failed; falling back to message chunks:\n" + traceback.format_exc())
     parts = chunks(answer)
+    if should_publish_document(source, answer) and extract_local_artifacts(answer, project.get("working_directory") or final_path.parent):
+        warning = (
+            "Attachment upload failed; the text result follows, but local artifacts were not delivered.\n\n"
+            if project_language(project) == "en"
+            else "附件上传失败；以下先返回文字结果，本地产物未送达。\n\n"
+        )
+        parts[0] = warning + parts[0]
     client.reply_post(message_id, parts[0], base_uuid)
     for index, part in enumerate(parts[1:], start=2):
         client.send_post(project["chat_id"], part, f"{base_uuid}-{index}")

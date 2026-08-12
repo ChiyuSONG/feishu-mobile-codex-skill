@@ -11,7 +11,7 @@ Send tasks to Codex continuously from Feishu without waiting for the previous ta
 - Review code, edit files, run tests, or organize information remotely from your phone;
 - Send several ideas and requirements continuously and let Codex process them in order;
 - Leave tasks in Feishu while away from the computer instead of recording them in another app;
-- Receive short results directly, while long tutorials, tables, screenshots, Excel workbooks, PDFs, and other artifacts are delivered through private Feishu documents for viewing or download on your phone;
+- Receive short results directly; long tutorials and tables use private Feishu documents, while screenshots, Excel workbooks, PDFs, and other artifacts are embedded or supplied as downloadable attachments;
 - Keep one Feishu group connected to one local project, even if the group is renamed;
 - Check message status and Codex usage, or create follow-up reminders in natural language.
 
@@ -104,7 +104,7 @@ Yes. Use a separate Feishu group for each project so their contexts do not mix.
 
 ### Does every reply become a Feishu document?
 
-No. Simple replies are sent directly in the group. Private Feishu documents are used for long or structurally complex content and for delivering screenshots, Excel workbooks, PDFs, or other files so you can view or download local artifacts remotely.
+No. Simple replies are sent directly in the group; private Feishu documents are used only for long or structurally complex content. Local screenshots, Excel workbooks, PDFs, and similar artifacts are embedded in the document. If Feishu cannot embed a file, the reply provides an explicit private download link instead of silently dropping it.
 
 ## Uninstall
 

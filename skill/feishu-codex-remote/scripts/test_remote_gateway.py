@@ -378,7 +378,9 @@ class RoutingTests(unittest.TestCase):
             {"working_directory": "C:/work/demo", "language": "en", "hourly_catch_up_enabled": True}
         )
         self.assertIn("开头加 `*`", zh)
+        self.assertIn("编辑或撤回", zh)
         self.assertIn("start one with `*`", en)
+        self.assertIn("editing or recalling", en)
 
     def test_resume_images_are_scoped_to_resume_subcommand(self):
         with patch.object(remote_gateway, "codex_cli_path", return_value=Path("codex.exe")):

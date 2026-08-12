@@ -108,6 +108,10 @@ No. The connection does not depend on the group name.
 
 Yes. Use a separate Feishu group for each project so their contexts do not mix.
 
+### Can I edit or recall a message after sending it by mistake?
+
+Do not rely on edits or recalls. The current version treats only new messages as reliable instructions: an edit or recall is not handled as a correction or cancellation of queued work. Send a new correction instead, for example: `Correction to my previous message: update only the README, not the code.` If the earlier task has already started, the correction waits for the next turn; it cannot live-steer the running turn or automatically undo completed actions.
+
 ### Does every reply become a Feishu document?
 
 No. Simple replies are sent directly in the group; private Feishu documents are used only for long or structurally complex content. Screenshots appear directly in the group. PDFs and Excel workbooks explicitly delivered by Codex arrive as downloadable chat attachments and may retain backup links in the full document. Delivery failures are reported instead of silently dropping an artifact.

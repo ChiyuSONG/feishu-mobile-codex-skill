@@ -80,23 +80,13 @@ For example, say:
 
 Each inspection starts a lightweight Codex run and consumes a small amount of the corresponding allowance. Pause it when you do not need it.
 
-## Use inspection for reminders
-
-You can also ask Codex to remember something that needs follow-up and remind you during an inspection after the specified time arrives.
-
-For a continuing reminder, say:
+Inspection can also become a small tool of your own. For example, say:
 
 > Starting at 10 AM tomorrow, remind me during every inspection to submit the document until I say it is complete.
 
-When it is complete, say:
+Codex remembers the item and keeps reminding you during inspections after that time. When it is done, simply say `The document has been submitted. Stop the reminder.` You can describe other inspection uses in natural language without following fixed commands.
 
-> The document has been submitted. Stop the reminder.
-
-For a one-time reminder, say:
-
-> After 3 PM tomorrow, remind me during the next inspection to call my friend back. Remind me only once.
-
-This is not an exact-time alarm. Reminders depend on the computer, Codex, and automatic inspection. If the computer is not running at the specified time, the reminder arrives during the next inspection after it resumes. Use Feishu Calendar or a phone alarm for anything that must happen at an exact time.
+These reminders depend on the computer, Codex, and automatic inspection; they are not exact-time alarms. Use Feishu Calendar or a phone alarm for anything that must happen at an exact time.
 
 ## Frequently asked questions
 

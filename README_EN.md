@@ -4,14 +4,14 @@
 
 Turn Feishu into a mobile entrance to your local Codex.
 
-Send tasks to Codex continuously from Feishu without waiting for the previous task to finish. The computer and Codex must remain running for tasks to execute and return results. When either is closed, Feishu can still receive new messages and keep them pending; Codex processes them in order after it opens again.
+Send tasks to Codex continuously from Feishu without waiting for the previous task to finish. The computer and Codex must remain running for tasks to execute and return results. When either is closed, Feishu can still receive new messages and keep them pending; Codex processes them in order after it opens again. Remote outputs such as screenshots, Excel workbooks, and PDFs can also be viewed or downloaded through Feishu.
 
 ## What it can do for you
 
 - Review code, edit files, run tests, or organize information remotely from your phone;
 - Send several ideas and requirements continuously and let Codex process them in order;
 - Leave tasks in Feishu while away from the computer instead of recording them in another app;
-- Receive short results directly and long tutorials, tables, or complex results as private Feishu documents;
+- Receive short results directly, while long tutorials, tables, screenshots, Excel workbooks, PDFs, and other artifacts are delivered through private Feishu documents for viewing or download on your phone;
 - Keep one Feishu group connected to one local project, even if the group is renamed;
 - Check message status and Codex usage, or create follow-up reminders in natural language.
 
@@ -104,7 +104,7 @@ Yes. Use a separate Feishu group for each project so their contexts do not mix.
 
 ### Does every reply become a Feishu document?
 
-No. Simple replies are sent directly in the group. Only long or structurally complex content, or content you explicitly request as a document, is organized into a private Feishu document.
+No. Simple replies are sent directly in the group. Private Feishu documents are used for long or structurally complex content and for delivering screenshots, Excel workbooks, PDFs, or other files so you can view or download local artifacts remotely.
 
 ## Uninstall
 

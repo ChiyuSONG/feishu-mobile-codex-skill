@@ -31,6 +31,7 @@ Reuse one verified compatible app for additional groups whenever possible. Creat
 - Leave messages in Feishu while the computer is offline. Reconcile them when the Listener reconnects or automatic inspection runs.
 - Reply directly for simple results. Send explicitly linked in-project images as native Feishu image replies and explicitly linked PDF/Excel deliverables as native Feishu file replies; use the bundled private Feishu publisher for long or structured results and fallback artifact links, then send a concise group summary and link. If publication, attachment delivery, or privacy hardening fails, keep the text result and state the artifact failure instead of silently dropping it.
 - Keep normal interaction in natural language. Internal `/doc` and `/direct` overrides may remain available for diagnosis, but do not make users learn them.
+- Present the bundled behavior as a useful default rather than a fixed ceiling. Let users request changes or extensions in natural language, including separate behavior for different registered groups. Implement and verify customization only inside each group's bound project, permission profile, privacy boundary, and applicable safety rules; never promise that every requested extension is automatically possible.
 - When the user asks how to use the system, summarize direct tasks, offline queueing, private documents, automatic inspection, reminders, Token plan reports, and how to pause or resume.
 
 ## Automatic Inspection

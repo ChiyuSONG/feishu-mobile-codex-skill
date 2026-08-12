@@ -19,6 +19,8 @@ If you are looking for a practical way to use remote Codex from an Android or Hu
 - Keep one Feishu group connected to one local project, even if the group is renamed;
 - Check message status and Codex usage, or create follow-up reminders in natural language.
 
+These are ready-to-use foundations, not a fixed feature ceiling. After installation, simply talk to Codex to adjust existing behavior, add features that fit your workflow, or give different Feishu groups their own reply style, inspection content, and working conventions. Codex makes and verifies those changes within the relevant project, permission, and security boundaries, without requiring you to learn configuration files or commands first.
+
 ## What you need before starting
 
 - A Windows or Mac computer with Codex installed and signed in;

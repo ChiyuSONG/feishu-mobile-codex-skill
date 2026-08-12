@@ -2,86 +2,93 @@
 
 [中文](README.md)
 
-Turn Feishu into a lightweight mobile entrance to your local Codex.
+Turn Feishu into a mobile entrance to your local Codex.
 
-You can send tasks continuously from your phone without waiting for the previous one to finish. Messages remain in Feishu while the computer is offline, and Codex processes them in order after it returns. Simple results are sent directly; complex results can be organized into private Feishu documents.
+Send tasks to Codex from Feishu at any time without staying at your computer or waiting for the previous task to finish. Messages remain in Feishu while the computer is offline, and Codex continues processing them in order the next time it opens.
 
-## What you can do
+## What it can do for you
 
-- Send tasks to local Codex directly from a Feishu group;
-- Keep one group reliably bound to one local project, even if the group is renamed;
-- Send several messages continuously and have Codex process them in order;
-- Leave tasks in Feishu while the computer is offline instead of recording them elsewhere;
+- Review code, edit files, run tests, or organize information remotely from your phone;
+- Send several ideas and requirements continuously and let Codex process them in order;
+- Leave tasks in Feishu while away from the computer instead of recording them in another app;
 - Receive short results directly and long tutorials, tables, or complex results as private Feishu documents;
-- Adjust automatic inspection, view Codex usage, or set reminders in natural language;
-- Talk in Chinese or English.
+- Keep one Feishu group connected to one local project, even if the group is renamed;
+- Check message status and Codex usage, or create follow-up reminders in natural language.
 
-Codex still understands requests, edits the project, runs tools, and completes the work. Feishu is simply a smooth and reliable mobile entrance.
+## What you need before starting
+
+- A Windows or Mac computer with Codex installed and signed in;
+- A working Feishu account;
+- A local project folder you want Codex to work with.
+
+Windows is ready for trial use. macOS support is currently Beta, so pay attention to any system guidance Codex provides during the first setup. Python 3.10 or later is required; if it is missing, Codex explains the requirement and helps you handle it first.
 
 ## Installation
 
-### 1. Install the Skill
+### Step 1: Give the Skill to Codex
 
-Give this repository URL to Codex and ask it to install `skill/feishu-codex-remote` from the repository.
+Send this repository URL to Codex and say:
 
-Alternatively, copy [`skill/feishu-codex-remote`](skill/feishu-codex-remote) into your Codex Skills directory, then restart or refresh Codex. Do not copy the entire repository as one Skill.
+> Install the `skill/feishu-codex-remote` Skill from this repository.
 
-### 2. Start setup with one prompt
+If the repository is private, first make sure the computer running Codex is signed in and has permission to access it on GitHub.
+
+Alternatively, copy [`skill/feishu-codex-remote`](skill/feishu-codex-remote) into the Codex Skills directory, then restart or refresh Codex. Do not copy the entire repository as one Skill.
+
+### Step 2: Connect Feishu with one prompt
 
 Open the local project you want to connect in Codex, then send:
 
 > Use `$feishu-codex-remote` to connect this project to my Feishu account. Automate everything possible and ask me only when I need to scan a QR code, sign in, or approve access.
 
-Codex checks the environment, creates an isolated Python environment, helps configure the Feishu app, binds the group, installs the Listener and startup Hook, and tests the complete message path.
-
-You normally only need to:
+Codex handles the remaining configuration. You normally only need to follow its prompts to:
 
 1. Scan a QR code or sign in to Feishu;
-2. Select the correct Feishu account or tenant and approve access;
-3. Paste the App Secret into a secure input location when necessary;
-4. Review and trust `Starting Feishu Remote Listener` when the Hook security prompt first appears.
+2. Select the correct Feishu account and approve access;
+3. Copy a Feishu app credential once when necessary;
+4. Confirm a Codex security prompt during the first startup.
 
-Codex handles internal settings such as the project key, chat ID, thread ID, and Listener path automatically.
+The Feishu group receives a welcome message when the connection succeeds.
 
-## Start using it
+## How to use it in Feishu
 
-After the connection succeeds, simply tell Codex what you want in the Feishu group:
+Send messages just as you normally talk to Codex:
 
 - `Review the latest project changes and run the tests.`
 - `I will send three requirements in a row. Process all of them in order after receiving them.`
 - `Put the complete result into a Feishu document.`
 - `Record this for now and wait until I send the remaining information.`
 
-Tasks do not run while the computer or Codex is closed, but the messages remain in Feishu. The startup Hook starts the Listener the next time Codex opens or resumes, and pending messages continue processing.
+You can continue sending messages while a task is running; new messages wait in the queue. Tasks do not run while the computer or Codex is closed, but messages are not lost. Processing continues after Codex opens again.
 
-## Automatic inspection
+## What automatic inspection does
 
-Automatic inspection runs once per hour by default. It checks the Listener, retrieves Feishu messages that may have been missed, moves pending tasks forward, and reports Codex usage.
+Automatic inspection runs once per hour by default. It confirms that the connection is healthy, finds missed or pending messages, and reports Codex usage.
 
-The first inspection explains its purpose in full. Later inspections use only three lines unless you change them:
+The first inspection explains its purpose. Later, unless you change it, the report briefly tells you:
 
-> Status: Listener healthy, 0 pending, 0 processing, 0 failed.
->
-> Codex usage: 5-hour allowance remaining ...; 7-day allowance remaining ...
->
-> Tip: Use natural language to change inspection, create reminders, or add other uses.
+1. Whether any messages are pending, processing, or failed;
+2. How much of the Codex 5-hour and 7-day allowances remains;
+3. That you can change inspection in natural language.
 
-Each inspection starts a lightweight Codex run and consumes the corresponding allowance. You can change it directly:
+For example, say:
 
 - `Notify me only when there are pending messages, failures, or other problems.`
-- `Do not report Codex usage.`
+- `Do not report Codex usage during inspection.`
 - `Run automatic inspection every two hours.`
 - `Pause automatic inspection.`
 
+Each inspection starts a lightweight Codex run and consumes a small amount of the corresponding allowance. Pause it when you do not need it.
+
 ## Use inspection for reminders
 
-Reminders are useful for something you need to follow up later. Codex saves the item and reminds you through automatic inspection after the specified time arrives.
+You can also ask Codex to remember something that needs follow-up and remind you during an inspection after the specified time arrives.
 
-For example, to keep following up on a document, say:
+For a continuing reminder, say:
 
 > Starting at 10 AM tomorrow, remind me during every inspection to submit the document until I say it is complete.
 
-Later, say:
+When it is complete, say:
 
 > The document has been submitted. Stop the reminder.
 
@@ -89,7 +96,25 @@ For a one-time reminder, say:
 
 > After 3 PM tomorrow, remind me during the next inspection to call my friend back. Remind me only once.
 
-This is not an independent exact-time alarm. Reminders depend on the computer, Codex, and automatic inspection. If the computer is not running at the specified time, the reminder arrives during the next inspection after it resumes. Use Feishu Calendar or a phone alarm when exact timing is required.
+This is not an exact-time alarm. Reminders depend on the computer, Codex, and automatic inspection. If the computer is not running at the specified time, the reminder arrives during the next inspection after it resumes. Use Feishu Calendar or a phone alarm for anything that must happen at an exact time.
+
+## Frequently asked questions
+
+### Does the computer need to stay on?
+
+No. You can keep sending messages in Feishu while the computer is off, but tasks wait until the computer and Codex are running again.
+
+### Does renaming the Feishu group break the connection?
+
+No. The connection does not depend on the group name.
+
+### Can I connect multiple projects?
+
+Yes. Use a separate Feishu group for each project so their contexts do not mix.
+
+### Does every reply become a Feishu document?
+
+No. Simple replies are sent directly in the group. Only long or structurally complex content, or content you explicitly request as a document, is organized into a private Feishu document.
 
 ## Uninstall
 
@@ -97,28 +122,22 @@ No command is required. Tell Codex:
 
 > Uninstall Feishu Remote Codex. Keep my Feishu conversations and documents, tell me what will be removed first, and then complete the uninstall automatically.
 
-Codex first lists what it plans to remove. After confirmation, it removes the Listener, startup Hook, automatic inspection, and local Skill added by this project without affecting unrelated tasks.
+Codex first lists what it plans to remove and waits for confirmation. Uninstalling does not affect unrelated Codex tasks and never deletes Feishu conversations, groups, or generated documents.
 
-A recovery backup is kept by default, and Feishu conversations, groups, and generated documents are never deleted. To also delete local credentials, cache, and historical state, explicitly add: `Also delete all local data.`
-
-## Supported environments
-
-- Windows: local automated tests are available;
-- macOS: adaptation and simulated tests are complete, but support remains experimental until validation on a real Mac;
-- Python: version 3.10 or later is required. If it is missing, Codex explains what needs to be installed first.
+A recovery backup is kept by default. To also delete local credentials, cache, and historical state, explicitly add: `Also delete all local data.`
 
 ## Privacy and security
 
-- No public callback or public service is required;
-- App Secrets and OAuth Tokens stay outside the repository, using DPAPI on Windows and Keychain on macOS;
+- Your local project does not need to be exposed to the public internet;
+- Feishu credentials are stored outside the repository;
 - Public link sharing is disabled and verified for generated Feishu documents;
-- Each group binds only to an explicitly selected local directory; the project is never guessed from the group name or message content;
-- The repository does not store private paths, Feishu IDs, credentials, conversations, or runtime state.
+- Each group connects only to the local project you explicitly select;
+- The repository does not store your credentials, conversations, project paths, or runtime history.
 
 See [SECURITY.md](SECURITY.md) for more information.
 
 ## License
 
-Released under the [MIT License](LICENSE): personal use, commercial use, modification, and redistribution are allowed, provided the license and copyright notice are retained.
+Released under the [MIT License](LICENSE). Personal use, commercial use, modification, and redistribution are allowed, provided the license and copyright notice are retained.
 
 This is an unofficial community project and is not affiliated with or endorsed by OpenAI or Feishu.

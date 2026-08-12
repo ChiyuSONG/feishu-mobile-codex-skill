@@ -401,6 +401,66 @@ class FeishuClient:
             raise GatewayError(f"Feishu image upload failed: {payload}")
         return image_key
 
+    def upload_message_file(self, file_path: str | Path, allowed_root: str | Path) -> str:
+        """Upload one explicit artifact as a Feishu message file."""
+        if not self._verified_tenant_key:
+            raise GatewayError("Refusing file upload before the Listener verifies the target tenant")
+        root = Path(allowed_root).expanduser().resolve(strict=True)
+        path = Path(file_path).expanduser().resolve(strict=True)
+        try:
+            path.relative_to(root)
+        except ValueError as exc:
+            raise GatewayError(f"Refusing file outside the bound project: {path}") from exc
+        if not path.is_file():
+            raise GatewayError(f"Artifact is not a file: {path}")
+        size = path.stat().st_size
+        if size <= 0:
+            raise GatewayError(f"Artifact is empty: {path}")
+        if size > 30 * 1024 * 1024:
+            raise GatewayError(f"Artifact exceeds Feishu's 30 MB message-file limit: {path}")
+
+        file_type = {
+            ".pdf": "pdf",
+            ".doc": "doc",
+            ".docx": "doc",
+            ".xls": "xls",
+            ".xlsx": "xls",
+            ".ppt": "ppt",
+            ".pptx": "ppt",
+        }.get(path.suffix.lower(), "stream")
+        boundary = "----CodexFeishuRemote" + os.urandom(12).hex()
+        filename = path.name.replace('"', "_").replace("\r", "_").replace("\n", "_")
+        content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        prefix = (
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="file_type"\r\n\r\n'
+            f"{file_type}\r\n"
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="file_name"\r\n\r\n'
+            f"{filename}\r\n"
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+            f"Content-Type: {content_type}\r\n\r\n"
+        ).encode("utf-8")
+        suffix = f"\r\n--{boundary}--\r\n".encode("ascii")
+        body = prefix + path.read_bytes() + suffix
+        request = urllib.request.Request(
+            f"{API_BASE}/im/v1/files",
+            data=body,
+            headers={
+                "Authorization": f"Bearer {self.tenant_token()}",
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "Content-Length": str(len(body)),
+            },
+            method="POST",
+        )
+        with self._open(request) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        file_key = str((payload.get("data") or {}).get("file_key") or "")
+        if payload.get("code", 0) != 0 or not file_key:
+            raise GatewayError(f"Feishu file upload failed: {payload}")
+        return file_key
+
     def tenant_info(self) -> dict[str, Any]:
         payload = self.request_json("GET", "/tenant/v2/tenant/query")
         tenant = (payload.get("data") or {}).get("tenant")
@@ -495,6 +555,18 @@ class FeishuClient:
             body={
                 "msg_type": "image",
                 "content": json.dumps({"image_key": image_key}, ensure_ascii=False),
+                "uuid": request_uuid,
+            },
+        )
+
+    def reply_file(self, message_id: str, file_key: str, request_uuid: str) -> dict[str, Any]:
+        quoted = urllib.parse.quote(message_id, safe="")
+        return self.request_json(
+            "POST",
+            f"/im/v1/messages/{quoted}/reply",
+            body={
+                "msg_type": "file",
+                "content": json.dumps({"file_key": file_key}, ensure_ascii=False),
                 "uuid": request_uuid,
             },
         )

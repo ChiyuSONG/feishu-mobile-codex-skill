@@ -108,7 +108,7 @@ class MessageParsingTests(unittest.TestCase):
                 patch.object(client, "_open", return_value=Response()) as opened,
             ):
                 image_key = client.upload_message_image(image, image.parent)
-        request = opened.call_args.args[0]
+        request = opened.call_args_list[0].args[0]
         self.assertEqual(image_key, "img_1")
         self.assertEqual(request.full_url, "https://open.feishu.cn/open-apis/im/v1/images")
         self.assertIn("multipart/form-data; boundary=", request.get_header("Content-type"))
@@ -138,6 +138,56 @@ class MessageParsingTests(unittest.TestCase):
         body = requested.call_args.kwargs["body"]
         self.assertEqual(body["msg_type"], "image")
         self.assertEqual(json.loads(body["content"]), {"image_key": "img_1"})
+
+    def test_message_file_upload_and_reply_use_official_shapes(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b'{"code":0,"data":{"file_key":"file_1"}}'
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw) / "project"
+            root.mkdir()
+            report = root / "report.pdf"
+            report.write_bytes(b"fake-pdf")
+            workbook = root / "data.xlsx"
+            workbook.write_bytes(b"fake-xlsx")
+            outside = Path(raw) / "private.xlsx"
+            outside.write_bytes(b"private")
+            client = FeishuClient("app", "secret")
+            with self.assertRaises(GatewayError):
+                client.upload_message_file(report, root)
+            client._verified_tenant_key = "tenant"
+            with self.assertRaises(GatewayError):
+                client.upload_message_file(outside, root)
+            with (
+                patch.object(client, "tenant_token", return_value="tenant-token"),
+                patch.object(client, "_open", return_value=Response()) as opened,
+            ):
+                file_key = client.upload_message_file(report, root)
+                excel_key = client.upload_message_file(workbook, root)
+        request = opened.call_args_list[0].args[0]
+        excel_request = opened.call_args_list[1].args[0]
+        self.assertEqual(file_key, "file_1")
+        self.assertEqual(request.full_url, "https://open.feishu.cn/open-apis/im/v1/files")
+        self.assertIn(b'name="file_type"', request.data)
+        self.assertIn(b"\r\npdf\r\n", request.data)
+        self.assertIn(b'name="file_name"', request.data)
+        self.assertIn(b'filename="report.pdf"', request.data)
+        self.assertEqual(excel_key, "file_1")
+        self.assertIn(b"\r\nxls\r\n", excel_request.data)
+        self.assertIn(b'filename="data.xlsx"', excel_request.data)
+
+        with patch.object(client, "request_json", return_value={"code": 0}) as requested:
+            client.reply_file("om_1", "file_1", "uuid-file-1")
+        body = requested.call_args.kwargs["body"]
+        self.assertEqual(body["msg_type"], "file")
+        self.assertEqual(json.loads(body["content"]), {"file_key": "file_1"})
 
 
 class RoutingTests(unittest.TestCase):
@@ -628,6 +678,66 @@ class RoutingTests(unittest.TestCase):
         parts = remote_gateway.chunks(text, 300)
         self.assertGreater(len(parts), 1)
         self.assertEqual("".join(parts), text)
+
+    def test_private_document_fallback_counts_as_delivered_artifact(self):
+        failed = [Path("Preview.PNG"), Path("report.pdf")]
+        delivered = [{"name": "preview.png", "url": "https://www.feishu.cn/file/file_1"}]
+        self.assertEqual(
+            remote_gateway.remaining_artifact_failures(failed, delivered),
+            [Path("report.pdf")],
+        )
+
+    def test_pdf_and_excel_are_replied_as_native_files(self):
+        class Client:
+            def __init__(self):
+                self.events = []
+
+            def upload_message_file(self, path, _allowed_root):
+                self.events.append(("upload", Path(path).name))
+                return f"key-{Path(path).suffix.lower()}"
+
+            def reply_post(self, _message_id, _markdown, _uuid):
+                self.events.append(("post",))
+
+            def reply_file(self, _message_id, file_key, request_uuid):
+                self.events.append(("file", file_key, request_uuid))
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            report = root / "report.pdf"
+            workbook = root / "data.xlsx"
+            notes = root / "notes.txt"
+            report.write_bytes(b"pdf")
+            workbook.write_bytes(b"xlsx")
+            notes.write_text("notes", encoding="utf-8")
+            answer = "\n".join(("Result", "[report](report.pdf)", "[data](data.xlsx)", "[notes](notes.txt)"))
+            final_path = root / "final.md"
+            final_path.write_text(answer, encoding="utf-8")
+            client = Client()
+            with patch.object(
+                remote_gateway,
+                "publish_document",
+                return_value={"document_url": "https://example.feishu.cn/docx/doc_1"},
+            ):
+                remote_gateway.reply_complete(
+                    client,
+                    {"chat_id": "oc_1", "working_directory": str(root)},
+                    {"message_id": "om_1", "content": '{"text":"show files"}'},
+                    answer,
+                    final_path,
+                    root / "gateway.log",
+                )
+        self.assertEqual(
+            [event[:2] for event in client.events],
+            [
+                ("upload", "report.pdf"),
+                ("upload", "data.xlsx"),
+                ("post",),
+                ("file", "key-.pdf"),
+                ("file", "key-.xlsx"),
+            ],
+        )
+        self.assertTrue(all(len(event[2]) <= 50 for event in client.events if event[0] == "file"))
 
     def test_document_failure_falls_back_to_complete_chunks(self):
         class Client:

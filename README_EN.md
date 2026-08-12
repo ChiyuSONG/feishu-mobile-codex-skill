@@ -2,16 +2,20 @@
 
 [中文](README.md)
 
-Turn Feishu into a mobile entrance to your local Codex.
+Turn Feishu into a mobile entrance to your local Codex. Start installation with one prompt and, when the environment is ready, aim to complete the first connection in about 15 minutes.
 
 Send tasks to Codex continuously from Feishu without waiting for the previous task to finish. The computer and Codex must remain running for tasks to execute and return results. When either is closed, Feishu can still receive new messages and keep them pending; Codex processes them in order after it opens again. Remote outputs such as screenshots, Excel workbooks, and PDFs can also be viewed or downloaded through Feishu.
+
+If you are looking for a practical way to use remote Codex from an Android or Huawei phone, or to connect Feishu to local Codex without depending on the ChatGPT/Codex mobile app, this small tool provides a simple path. It does not require exposing your local project to the public internet or running a separate management dashboard.
+
+![Example of sending a task to remote Codex and receiving a document and inspection status in Feishu](assets/feishu-remote-codex-preview.png)
 
 ## What it can do for you
 
 - Review code, edit files, run tests, or organize information remotely from your phone;
 - Send several ideas and requirements continuously and let Codex process them in order;
 - Leave tasks in Feishu while away from the computer instead of recording them in another app;
-- Receive short results directly; screenshots appear as native Feishu images, long tutorials and tables use private Feishu documents, and Excel workbooks, PDFs, and other artifacts are embedded or supplied as downloadable attachments;
+- Receive short results directly; screenshots appear as native Feishu images, explicitly delivered PDFs and Excel workbooks arrive as chat attachments, and long tutorials or complex layouts use private Feishu documents;
 - Keep one Feishu group connected to one local project, even if the group is renamed;
 - Check message status and Codex usage, or create follow-up reminders in natural language.
 
@@ -104,7 +108,7 @@ Yes. Use a separate Feishu group for each project so their contexts do not mix.
 
 ### Does every reply become a Feishu document?
 
-No. Simple replies are sent directly in the group; private Feishu documents are used only for long or structurally complex content. Screenshots appear directly in the group and may also be included in the full document. Excel workbooks, PDFs, and other local artifacts are embedded or provided through explicit private download links. Delivery failures are reported instead of silently dropping an artifact.
+No. Simple replies are sent directly in the group; private Feishu documents are used only for long or structurally complex content. Screenshots appear directly in the group. PDFs and Excel workbooks explicitly delivered by Codex arrive as downloadable chat attachments and may retain backup links in the full document. Delivery failures are reported instead of silently dropping an artifact.
 
 ## Uninstall
 

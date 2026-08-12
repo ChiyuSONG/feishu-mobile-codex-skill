@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import base64
 from pathlib import Path
+import shutil
 from types import SimpleNamespace
 import tempfile
 import unittest
 from unittest.mock import patch
+import zipfile
 
 import feishu_publish
 
@@ -30,6 +33,48 @@ class FeishuPublishTests(unittest.TestCase):
             self.assertIn("preview.png", text)
             self.assertNotIn(image.as_posix(), text)
             self.assertNotIn("![preview]", text)
+
+    def test_markdown_conversion_preserves_images_but_not_file_links(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            temp = root / "temp"
+            temp.mkdir()
+            image = root / "preview.png"
+            report = root / "report.pdf"
+            image.write_bytes(b"png")
+            report.write_bytes(b"pdf")
+            source = root / "final.md"
+            source.write_text(
+                f"![preview](<{image.as_posix()}>)\n\n[report](<{report.as_posix()}>)",
+                encoding="utf-8",
+            )
+            prepared = feishu_publish.markdown_without_local_artifacts(
+                source,
+                [image, report],
+                temp,
+                preserve_local_images=True,
+            )
+            text = prepared.read_text(encoding="utf-8")
+            self.assertIn(f"![preview](<{image.as_posix()}>)", text)
+            self.assertNotIn(report.as_posix(), text)
+            self.assertIn("report.pdf", text)
+
+    @unittest.skipUnless(shutil.which("pandoc"), "Pandoc is required for the DOCX media smoke test")
+    def test_markdown_conversion_packages_real_image_in_docx(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            image = root / "preview.png"
+            image.write_bytes(
+                base64.b64decode(
+                    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+                )
+            )
+            source = root / "final.md"
+            source.write_text(f"![preview](<{image}>)", encoding="utf-8")
+            output = feishu_publish.convert_for_reading(source, "Image smoke", root, [image])
+            with zipfile.ZipFile(output) as archive:
+                self.assertTrue(any(name.startswith("word/media/") for name in archive.namelist()))
+                self.assertIn(b"<w:drawing>", archive.read("word/document.xml"))
 
     def test_embed_document_image_uploads_updates_and_verifies(self):
         with tempfile.TemporaryDirectory() as raw:

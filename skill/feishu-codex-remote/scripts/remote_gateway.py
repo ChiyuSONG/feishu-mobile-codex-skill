@@ -694,6 +694,7 @@ def should_publish_document(source_text: str, answer: str) -> bool:
 
 
 IMAGE_ARTIFACT_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+NATIVE_MESSAGE_FILE_SUFFIXES = {".pdf", ".xls", ".xlsx"}
 FILE_ARTIFACT_SUFFIXES = {
     ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".csv", ".tsv",
     ".ppt", ".pptx", ".zip", ".txt", ".json",
@@ -1044,6 +1045,75 @@ def reply_inline_images(
     return failed
 
 
+def upload_inline_files(
+    client: FeishuClient,
+    artifacts: list[Path],
+    allowed_root: str | Path,
+    log_path: Path,
+) -> tuple[list[tuple[Path, str]], list[Path]]:
+    uploaded: list[tuple[Path, str]] = []
+    failed: list[Path] = []
+    for artifact in artifacts:
+        if artifact.suffix.lower() not in NATIVE_MESSAGE_FILE_SUFFIXES:
+            continue
+        try:
+            uploaded.append((artifact, client.upload_message_file(artifact, allowed_root)))
+        except Exception:
+            failed.append(artifact)
+            append_log(log_path, f"direct file upload failed for {artifact}:\n" + traceback.format_exc())
+    return uploaded, failed
+
+
+def reply_inline_files(
+    client: FeishuClient,
+    message_id: str,
+    uploaded: list[tuple[Path, str]],
+    base_uuid: str,
+    log_path: Path,
+) -> list[Path]:
+    failed: list[Path] = []
+    for index, (artifact, file_key) in enumerate(uploaded, start=1):
+        try:
+            client.reply_file(message_id, file_key, f"{base_uuid[:35]}-file-{index}")
+        except Exception:
+            failed.append(artifact)
+            append_log(log_path, f"direct file reply failed for {artifact}:\n" + traceback.format_exc())
+    return failed
+
+
+def send_artifact_warning(
+    client: FeishuClient,
+    project: dict[str, Any],
+    failed: list[Path],
+    base_uuid: str,
+    log_path: Path,
+) -> None:
+    if not failed:
+        return
+    names = "、".join(path.name for path in failed[:5])
+    if len(failed) > 5:
+        names += f" 等 {len(failed)} 个文件"
+    english = project_language(project) == "en"
+    text = (
+        f"Some attachments were not delivered ({names}). Open the Feishu document fallback or ask Codex to retry."
+        if english
+        else f"部分附件未送达（{names}）。可打开飞书文档中的备用链接，或让 Codex 重试。"
+    )
+    try:
+        client.send_post(project["chat_id"], text, f"{base_uuid[:35]}-artifact-warn")
+    except Exception:
+        append_log(log_path, "artifact warning delivery failed:\n" + traceback.format_exc())
+
+
+def remaining_artifact_failures(failed: list[Path], delivered: list[dict[str, str]]) -> list[Path]:
+    delivered_names = {
+        str(item.get("name") or "").strip().casefold()
+        for item in delivered
+        if str(item.get("url") or "").startswith("http")
+    }
+    return [path for path in failed if path.name.casefold() not in delivered_names]
+
+
 def reply_complete(
     client: FeishuClient,
     project: dict[str, Any],
@@ -1055,11 +1125,18 @@ def reply_complete(
     source = message_text(item.get("content"))
     message_id = item["message_id"]
     base_uuid = "codex-remote-" + hashlib.sha256(message_id.encode("utf-8")).hexdigest()[:32]
-    artifacts = extract_local_artifacts(answer, project.get("working_directory") or final_path.parent)
+    allowed_root = project.get("working_directory") or final_path.parent
+    artifacts = extract_local_artifacts(answer, allowed_root)
     uploaded_images, image_upload_failures = upload_inline_images(
         client,
         artifacts,
-        project.get("working_directory") or final_path.parent,
+        allowed_root,
+        log_path,
+    )
+    uploaded_files, file_upload_failures = upload_inline_files(
+        client,
+        artifacts,
+        allowed_root,
         log_path,
     )
     if should_publish_document(source, answer):
@@ -1077,13 +1154,24 @@ def reply_complete(
                 lines = [f"[{item['name']}]({item['url']})" for item in fallback_artifacts]
                 text += f"\n\n{artifact_label}：" + " · ".join(lines)
             client.reply_post(message_id, text, base_uuid)
-            reply_inline_images(client, message_id, uploaded_images, base_uuid, log_path)
+            image_reply_failures = reply_inline_images(client, message_id, uploaded_images, base_uuid, log_path)
+            file_reply_failures = reply_inline_files(client, message_id, uploaded_files, base_uuid, log_path)
+            failed_artifacts = remaining_artifact_failures(
+                image_upload_failures + file_upload_failures + image_reply_failures + file_reply_failures,
+                fallback_artifacts,
+            )
+            send_artifact_warning(
+                client,
+                project,
+                failed_artifacts,
+                base_uuid,
+                log_path,
+            )
             return link
         except Exception:
             append_log(log_path, "document publish failed; falling back to message chunks:\n" + traceback.format_exc())
     parts = chunks(answer)
-    non_image_artifacts = [path for path in artifacts if path.suffix.lower() not in IMAGE_ARTIFACT_SUFFIXES]
-    if should_publish_document(source, answer) and (non_image_artifacts or image_upload_failures):
+    if should_publish_document(source, answer) and (image_upload_failures or file_upload_failures):
         warning = (
             "Attachment upload failed; the text result follows, but local artifacts were not delivered.\n\n"
             if project_language(project) == "en"
@@ -1092,13 +1180,14 @@ def reply_complete(
         parts[0] = warning + parts[0]
     client.reply_post(message_id, parts[0], base_uuid)
     image_reply_failures = reply_inline_images(client, message_id, uploaded_images, base_uuid, log_path)
-    if image_reply_failures:
-        warning = (
-            "Some images could not be delivered. Ask Codex to retry or request them as downloadable files."
-            if project_language(project) == "en"
-            else "部分图片未能送达；可以让 Codex 重试，或改为可下载文件。"
-        )
-        client.send_post(project["chat_id"], warning, f"{base_uuid[:35]}-img-warn")
+    file_reply_failures = reply_inline_files(client, message_id, uploaded_files, base_uuid, log_path)
+    send_artifact_warning(
+        client,
+        project,
+        image_upload_failures + file_upload_failures + image_reply_failures + file_reply_failures,
+        base_uuid,
+        log_path,
+    )
     for index, part in enumerate(parts[1:], start=2):
         client.send_post(project["chat_id"], part, f"{base_uuid}-{index}")
     return ""

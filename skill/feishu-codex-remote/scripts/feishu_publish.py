@@ -474,7 +474,13 @@ def assert_source_safe(path: Path, allow_sensitive: bool) -> None:
         raise PublishError(f"Empty files cannot be uploaded: {path}")
 
 
-def markdown_without_local_artifacts(source: Path, artifacts: list[Path], temp_dir: Path) -> Path:
+def markdown_without_local_artifacts(
+    source: Path,
+    artifacts: list[Path],
+    temp_dir: Path,
+    *,
+    preserve_local_images: bool = False,
+) -> Path:
     if source.suffix.lower() not in {".md", ".markdown", ".mark"} or not artifacts:
         return source
     expected = {os.path.normcase(str(path.resolve())): path for path in artifacts}
@@ -496,6 +502,11 @@ def markdown_without_local_artifacts(source: Path, artifacts: list[Path], temp_d
         artifact = expected.get(key)
         if not artifact:
             return match.group(0)
+        if preserve_local_images and match.group(1) and artifact.suffix.lower() in IMAGE_SUFFIXES:
+            # Pandoc packages this local image into the intermediate DOCX. Importing
+            # that DOCX preserves the visible image even when the legacy Feishu app
+            # lacks docx block/media scopes. Non-image files remain private fallbacks.
+            return match.group(0)
         label = "Image" if match.group(1) else "Attachment"
         return f"[{label}: {artifact.name} -- available below or from the Feishu reply]"
 
@@ -511,7 +522,12 @@ def convert_for_reading(source: Path, title: str, temp_dir: Path, artifacts: lis
     if not pandoc:
         raise PublishError("Pandoc is required to convert Markdown/HTML/text into a mobile-readable Feishu document")
     original_parent = source.parent
-    source = markdown_without_local_artifacts(source, artifacts or [], temp_dir)
+    source = markdown_without_local_artifacts(
+        source,
+        artifacts or [],
+        temp_dir,
+        preserve_local_images=True,
+    )
     output = temp_dir / f"{sanitize_title(title)}.docx"
     cmd = [pandoc, str(source), "-o", str(output), "--metadata", f"title={title}", "--resource-path", str(original_parent)]
     completed = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)

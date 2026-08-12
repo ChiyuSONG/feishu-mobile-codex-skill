@@ -299,6 +299,7 @@ class FeishuClient:
         self.app_secret = app_secret
         self._token = ""
         self._token_deadline = 0.0
+        self._verified_tenant_key = ""
 
     def _open(self, request: urllib.request.Request):
         try:
@@ -351,6 +352,54 @@ class FeishuClient:
         if payload.get("code", 0) != 0:
             raise GatewayError(f"Feishu API error at {path}: {payload}")
         return payload
+
+    def upload_message_image(self, image_path: str | Path, allowed_root: str | Path) -> str:
+        """Upload one explicit image, restricted to the bound project root."""
+        if not self._verified_tenant_key:
+            raise GatewayError("Refusing image upload before the Listener verifies the target tenant")
+        root = Path(allowed_root).expanduser().resolve(strict=True)
+        path = Path(image_path).expanduser().resolve(strict=True)
+        try:
+            path.relative_to(root)
+        except ValueError as exc:
+            raise GatewayError(f"Refusing image outside the bound project: {path}") from exc
+        if not path.is_file():
+            raise GatewayError(f"Image is not a file: {path}")
+        size = path.stat().st_size
+        if size <= 0:
+            raise GatewayError(f"Image is empty: {path}")
+        if size > 10 * 1024 * 1024:
+            raise GatewayError(f"Image exceeds Feishu's 10 MB message-image limit: {path}")
+
+        boundary = "----CodexFeishuRemote" + os.urandom(12).hex()
+        filename = path.name.replace('"', "_").replace("\r", "_").replace("\n", "_")
+        content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        prefix = (
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="image_type"\r\n\r\n'
+            "message\r\n"
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="image"; filename="{filename}"\r\n'
+            f"Content-Type: {content_type}\r\n\r\n"
+        ).encode("utf-8")
+        suffix = f"\r\n--{boundary}--\r\n".encode("ascii")
+        body = prefix + path.read_bytes() + suffix
+        request = urllib.request.Request(
+            f"{API_BASE}/im/v1/images",
+            data=body,
+            headers={
+                "Authorization": f"Bearer {self.tenant_token()}",
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "Content-Length": str(len(body)),
+            },
+            method="POST",
+        )
+        with self._open(request) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        image_key = str((payload.get("data") or {}).get("image_key") or "")
+        if payload.get("code", 0) != 0 or not image_key:
+            raise GatewayError(f"Feishu image upload failed: {payload}")
+        return image_key
 
     def tenant_info(self) -> dict[str, Any]:
         payload = self.request_json("GET", "/tenant/v2/tenant/query")
@@ -434,6 +483,18 @@ class FeishuClient:
             body={
                 "msg_type": "post",
                 "content": self._post_content(markdown),
+                "uuid": request_uuid,
+            },
+        )
+
+    def reply_image(self, message_id: str, image_key: str, request_uuid: str) -> dict[str, Any]:
+        quoted = urllib.parse.quote(message_id, safe="")
+        return self.request_json(
+            "POST",
+            f"/im/v1/messages/{quoted}/reply",
+            body={
+                "msg_type": "image",
+                "content": json.dumps({"image_key": image_key}, ensure_ascii=False),
                 "uuid": request_uuid,
             },
         )

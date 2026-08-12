@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 import remote_gateway
-from gateway_common import message_text, resource_keys
+from gateway_common import FeishuClient, GatewayError, message_text, resource_keys
 
 
 def write_rollout(path: Path, messages: list[dict]) -> None:
@@ -86,6 +86,58 @@ class MessageParsingTests(unittest.TestCase):
     def test_server_post_prefers_content_v2_without_duplicate_text(self):
         raw = '{"content":[[{"tag":"text","text":"旧版"}]],"content_v2":[[{"tag":"md","text":"新版"}]]}'
         self.assertEqual(message_text(raw), "新版")
+
+    def test_message_image_upload_uses_official_multipart_shape(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b'{"code":0,"data":{"image_key":"img_1"}}'
+
+        with tempfile.TemporaryDirectory() as raw:
+            image = Path(raw) / "preview.png"
+            image.write_bytes(b"fake-png")
+            client = FeishuClient("app", "secret")
+            client._verified_tenant_key = "tenant"
+            with (
+                patch.object(client, "tenant_token", return_value="tenant-token"),
+                patch.object(client, "_open", return_value=Response()) as opened,
+            ):
+                image_key = client.upload_message_image(image, image.parent)
+        request = opened.call_args.args[0]
+        self.assertEqual(image_key, "img_1")
+        self.assertEqual(request.full_url, "https://open.feishu.cn/open-apis/im/v1/images")
+        self.assertIn("multipart/form-data; boundary=", request.get_header("Content-type"))
+        self.assertIn(b'name="image_type"', request.data)
+        self.assertIn(b"message", request.data)
+        self.assertIn(b'filename="preview.png"', request.data)
+
+    def test_message_image_upload_rejects_unverified_tenant_and_outside_path(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw) / "project"
+            root.mkdir()
+            image = root / "preview.png"
+            image.write_bytes(b"inside")
+            outside = Path(raw) / "outside.png"
+            outside.write_bytes(b"private")
+            client = FeishuClient("app", "secret")
+            with self.assertRaises(GatewayError):
+                client.upload_message_image(image, root)
+            client._verified_tenant_key = "tenant"
+            with self.assertRaises(GatewayError):
+                client.upload_message_image(outside, root)
+
+    def test_image_reply_uses_image_message_content(self):
+        client = FeishuClient("app", "secret")
+        with patch.object(client, "request_json", return_value={"code": 0}) as requested:
+            client.reply_image("om_1", "img_1", "uuid-1")
+        body = requested.call_args.kwargs["body"]
+        self.assertEqual(body["msg_type"], "image")
+        self.assertEqual(json.loads(body["content"]), {"image_key": "img_1"})
 
 
 class RoutingTests(unittest.TestCase):
@@ -531,9 +583,17 @@ class RoutingTests(unittest.TestCase):
         class Client:
             def __init__(self):
                 self.text = ""
+                self.images = []
 
             def reply_post(self, _message_id, markdown, _uuid):
                 self.text = markdown
+
+            def upload_message_image(self, path, _allowed_root):
+                self.images.append(("upload", Path(path).name))
+                return "img_1"
+
+            def reply_image(self, _message_id, image_key, request_uuid):
+                self.images.append(("reply", image_key, request_uuid))
 
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -559,6 +619,9 @@ class RoutingTests(unittest.TestCase):
             self.assertEqual(link, published["document_url"])
             self.assertIn("preview.png", client.text)
             self.assertEqual(mocked.call_args.args[2], [image.resolve()])
+            self.assertEqual(client.images[0], ("upload", "preview.png"))
+            self.assertEqual(client.images[1][0:2], ("reply", "img_1"))
+            self.assertLessEqual(len(client.images[1][2]), 50)
 
     def test_chunks_preserve_content(self):
         text = "段落。" * 2000

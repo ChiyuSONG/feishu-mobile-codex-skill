@@ -63,7 +63,7 @@ Generalize the proven reminder interaction without importing project-specific he
 | Capability | Current state |
 | --- | --- |
 | Durable ordered Feishu inbox, offline recovery, persistent Codex thread | Implemented and covered by deterministic tests |
-| Direct Feishu replies and private-document routing | Implemented; local images/files are inserted through native Docx blocks and read back, with a private-file fallback when a legacy app lacks Docx permission |
+| Direct Feishu replies and private-document routing | Implemented; explicit in-project Markdown images are sent as native Feishu image replies after tenant verification, while private documents and private-file links remain the fallback for complex content and other artifacts |
 | One-prompt installer | Skill workflow and runtime bootstrap implemented; real clean-machine/CUA onboarding not yet accepted |
 | QR/login-based Feishu authorization | Browser OAuth with a localhost callback is implemented and can use Feishu's QR login when offered; real clean-account testing remains |
 | CUA/browser-assisted Feishu console setup | Procedure defined; real console navigation not yet accepted |
@@ -106,7 +106,7 @@ These are design candidates only; none is a finished product rule yet.
 - A new consumer can start from the public package and one simple prompt without reading internal design documents.
 - All unavoidable manual actions appear in one initial checklist, and each completed step is automatically verified.
 - No app secret, token, tenant ID, chat ID, local username, private path, or conversation content exists in the package or logs by default.
-- Direct reply, private-document reply, offline queue recovery, duplicate-event handling, restart recovery, and uninstall instructions pass on a clean Windows account.
+- Direct reply, native image reply, private-document reply, offline queue recovery, duplicate-event handling, restart recovery, and uninstall instructions pass on a clean Windows account.
 - The same suite passes on a clean macOS account before macOS is called supported.
 - The generated Feishu app uses least privilege, generated documents remain non-public, and no public endpoint is required unless the user separately approves and secures it.
 - Uninstall removes only Skill-owned launchers, environments, and state after showing the exact targets; it never deletes Feishu conversations or generated documents.

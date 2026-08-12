@@ -1008,6 +1008,42 @@ def send_default_inspection_message(config: dict[str, Any], project_key: str) ->
     return send_routine_inspection_message(config, project_key)
 
 
+def upload_inline_images(
+    client: FeishuClient,
+    artifacts: list[Path],
+    allowed_root: str | Path,
+    log_path: Path,
+) -> tuple[list[tuple[Path, str]], list[Path]]:
+    uploaded: list[tuple[Path, str]] = []
+    failed: list[Path] = []
+    for artifact in artifacts:
+        if artifact.suffix.lower() not in IMAGE_ARTIFACT_SUFFIXES:
+            continue
+        try:
+            uploaded.append((artifact, client.upload_message_image(artifact, allowed_root)))
+        except Exception:
+            failed.append(artifact)
+            append_log(log_path, f"direct image upload failed for {artifact}:\n" + traceback.format_exc())
+    return uploaded, failed
+
+
+def reply_inline_images(
+    client: FeishuClient,
+    message_id: str,
+    uploaded: list[tuple[Path, str]],
+    base_uuid: str,
+    log_path: Path,
+) -> list[Path]:
+    failed: list[Path] = []
+    for index, (artifact, image_key) in enumerate(uploaded, start=1):
+        try:
+            client.reply_image(message_id, image_key, f"{base_uuid[:35]}-img-{index}")
+        except Exception:
+            failed.append(artifact)
+            append_log(log_path, f"direct image reply failed for {artifact}:\n" + traceback.format_exc())
+    return failed
+
+
 def reply_complete(
     client: FeishuClient,
     project: dict[str, Any],
@@ -1019,8 +1055,14 @@ def reply_complete(
     source = message_text(item.get("content"))
     message_id = item["message_id"]
     base_uuid = "codex-remote-" + hashlib.sha256(message_id.encode("utf-8")).hexdigest()[:32]
+    artifacts = extract_local_artifacts(answer, project.get("working_directory") or final_path.parent)
+    uploaded_images, image_upload_failures = upload_inline_images(
+        client,
+        artifacts,
+        project.get("working_directory") or final_path.parent,
+        log_path,
+    )
     if should_publish_document(source, answer):
-        artifacts = extract_local_artifacts(answer, project.get("working_directory") or final_path.parent)
         try:
             published = publish_document(project, final_path, artifacts)
             link = str(published["document_url"])
@@ -1035,11 +1077,13 @@ def reply_complete(
                 lines = [f"[{item['name']}]({item['url']})" for item in fallback_artifacts]
                 text += f"\n\n{artifact_label}：" + " · ".join(lines)
             client.reply_post(message_id, text, base_uuid)
+            reply_inline_images(client, message_id, uploaded_images, base_uuid, log_path)
             return link
         except Exception:
             append_log(log_path, "document publish failed; falling back to message chunks:\n" + traceback.format_exc())
     parts = chunks(answer)
-    if should_publish_document(source, answer) and extract_local_artifacts(answer, project.get("working_directory") or final_path.parent):
+    non_image_artifacts = [path for path in artifacts if path.suffix.lower() not in IMAGE_ARTIFACT_SUFFIXES]
+    if should_publish_document(source, answer) and (non_image_artifacts or image_upload_failures):
         warning = (
             "Attachment upload failed; the text result follows, but local artifacts were not delivered.\n\n"
             if project_language(project) == "en"
@@ -1047,6 +1091,14 @@ def reply_complete(
         )
         parts[0] = warning + parts[0]
     client.reply_post(message_id, parts[0], base_uuid)
+    image_reply_failures = reply_inline_images(client, message_id, uploaded_images, base_uuid, log_path)
+    if image_reply_failures:
+        warning = (
+            "Some images could not be delivered. Ask Codex to retry or request them as downloadable files."
+            if project_language(project) == "en"
+            else "部分图片未能送达；可以让 Codex 重试，或改为可下载文件。"
+        )
+        client.send_post(project["chat_id"], warning, f"{base_uuid[:35]}-img-warn")
     for index, part in enumerate(parts[1:], start=2):
         client.send_post(project["chat_id"], part, f"{base_uuid}-{index}")
     return ""
@@ -1305,6 +1357,7 @@ class GatewayService:
         expected_tenant = str(config["expected_tenant_key"])
         if actual_tenant != expected_tenant:
             raise GatewayError(f"Wrong Feishu tenant: expected {expected_tenant}, got {actual_tenant}")
+        self.client._verified_tenant_key = actual_tenant
         self.log_path = REMOTE_STATE / "logs" / "gateway.log"
         self.workers: dict[str, ProjectWorker] = {}
         self.chat_to_key: dict[str, str] = {}

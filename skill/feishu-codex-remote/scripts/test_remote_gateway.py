@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -625,6 +626,22 @@ class RoutingTests(unittest.TestCase):
         answer = "```python\na=1\n```\n\n```text\nok\n```"
         self.assertTrue(remote_gateway.should_publish_document("test", answer))
 
+    def test_short_image_answer_stays_direct(self):
+        answer = "done\n\n![preview](/C:/project/output/preview.png)"
+        self.assertFalse(remote_gateway.should_publish_document("test", answer))
+
+    @unittest.skipUnless(os.name == "nt", "Windows renderer path normalization")
+    def test_codex_windows_absolute_image_path_is_extracted(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            image = root / "preview.png"
+            image.write_bytes(b"png")
+            renderer_path = "/" + image.as_posix()
+            self.assertEqual(
+                remote_gateway.extract_local_artifacts(f"![preview]({renderer_path})", root),
+                [image.resolve()],
+            )
+
     def test_extract_local_artifacts_only_accepts_explicit_files_inside_workspace(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw) / "project"
@@ -675,7 +692,7 @@ class RoutingTests(unittest.TestCase):
                 link = remote_gateway.reply_complete(
                     client,
                     {"chat_id": "oc_1", "working_directory": str(root)},
-                    {"message_id": "om_1", "content": '{"text":"show image"}'},
+                    {"message_id": "om_1", "content": '{"text":"/doc show image"}'},
                     answer,
                     final_path,
                     root / "gateway.log",
@@ -686,6 +703,119 @@ class RoutingTests(unittest.TestCase):
             self.assertEqual(client.images[0], ("upload", "preview.png"))
             self.assertEqual(client.images[1][0:2], ("reply", "img_1"))
             self.assertLessEqual(len(client.images[1][2]), 50)
+
+    def test_direct_image_upload_failure_is_visible(self):
+        class Client:
+            def __init__(self):
+                self.events = []
+
+            def upload_message_image(self, _path, _allowed_root):
+                raise RuntimeError("missing im:resource")
+
+            def reply_post(self, _message_id, _markdown, _uuid):
+                self.events.append(("post", _markdown))
+
+            def send_post(self, _chat_id, markdown, _uuid):
+                self.events.append(("warning", markdown))
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            image = root / "preview.png"
+            image.write_bytes(b"png")
+            answer = "done\n\n![preview](preview.png)"
+            final_path = root / "final.md"
+            final_path.write_text(answer, encoding="utf-8")
+            client = Client()
+            remote_gateway.reply_complete(
+                client,
+                {"chat_id": "oc_1", "working_directory": str(root)},
+                {"message_id": "om_1", "content": '{"text":"show image"}'},
+                answer,
+                final_path,
+                root / "gateway.log",
+            )
+        self.assertEqual(client.events[0][0], "post")
+        self.assertTrue(client.events[0][1].startswith("附件未送达（preview.png）"))
+        self.assertNotIn("飞书文档中的备用链接", client.events[0][1])
+        self.assertEqual(len(client.events), 1)
+
+    def test_direct_image_reply_failure_sends_verified_warning(self):
+        class Client:
+            def __init__(self):
+                self.events = []
+
+            def upload_message_image(self, _path, _allowed_root):
+                return "img_1"
+
+            def reply_image(self, _message_id, _image_key, _uuid):
+                raise RuntimeError("reply failed")
+
+            def reply_post(self, _message_id, markdown, _uuid):
+                self.events.append(("post", markdown))
+
+            def send_post(self, _chat_id, markdown, _uuid):
+                self.events.append(("warning", markdown))
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            image = root / "preview.png"
+            image.write_bytes(b"png")
+            answer = "done\n\n![preview](preview.png)"
+            final_path = root / "final.md"
+            final_path.write_text(answer, encoding="utf-8")
+            client = Client()
+            remote_gateway.reply_complete(
+                client,
+                {"chat_id": "oc_1", "working_directory": str(root)},
+                {"message_id": "om_1", "content": '{"text":"show image"}'},
+                answer,
+                final_path,
+                root / "gateway.log",
+            )
+        self.assertEqual(client.events[0], ("post", answer))
+        self.assertEqual(client.events[1][0], "warning")
+        self.assertIn("部分附件未送达（preview.png）", client.events[1][1])
+        self.assertNotIn("飞书文档中的备用链接", client.events[1][1])
+
+    def test_document_image_upload_failure_is_prefixed_when_no_fallback_exists(self):
+        class Client:
+            def __init__(self):
+                self.events = []
+
+            def upload_message_image(self, _path, _allowed_root):
+                raise RuntimeError("missing im:resource")
+
+            def reply_post(self, _message_id, markdown, _uuid):
+                self.events.append(("post", markdown))
+
+            def send_post(self, _chat_id, markdown, _uuid):
+                self.events.append(("warning", markdown))
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            image = root / "preview.png"
+            image.write_bytes(b"png")
+            answer = "done\n\n![preview](preview.png)"
+            final_path = root / "final.md"
+            final_path.write_text(answer, encoding="utf-8")
+            client = Client()
+            with patch.object(
+                remote_gateway,
+                "publish_document",
+                return_value={"document_url": "https://www.feishu.cn/docx/doc_1", "artifacts": []},
+            ):
+                link = remote_gateway.reply_complete(
+                    client,
+                    {"chat_id": "oc_1", "working_directory": str(root)},
+                    {"message_id": "om_1", "content": '{"text":"/doc show image"}'},
+                    answer,
+                    final_path,
+                    root / "gateway.log",
+                )
+        self.assertEqual(link, "https://www.feishu.cn/docx/doc_1")
+        self.assertTrue(client.events[0][1].startswith("附件未送达（preview.png）"))
+        self.assertIn("打开完整飞书文档", client.events[0][1])
+        self.assertEqual(len(client.events), 1)
 
     def test_chunks_preserve_content(self):
         text = "段落。" * 2000

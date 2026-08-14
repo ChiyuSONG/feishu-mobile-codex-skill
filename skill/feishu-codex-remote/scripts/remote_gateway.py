@@ -689,8 +689,7 @@ def should_publish_document(source_text: str, answer: str) -> bool:
     if source_text.lstrip().startswith("/direct"):
         return False
     structural = answer.count("```") >= 4 or bool(re.search(r"(?m)^\|.+\|\s*$", answer))
-    media = bool(re.search(r"(?i)\.(png|jpe?g|gif|webp|pdf)\b", answer))
-    return structural or media or len(answer) > 3500
+    return structural or len(answer) > 3500
 
 
 IMAGE_ARTIFACT_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
@@ -718,6 +717,11 @@ def extract_local_artifacts(answer: str, working_directory: str | Path) -> list[
             continue
         if raw.startswith("file:///"):
             raw = raw[8:]
+        # Codex renders Windows absolute Markdown targets as `/C:/...`.
+        # pathlib treats that spelling as a drive-less rooted path on Windows,
+        # so normalize it before resolving and enforcing the allowed root.
+        if re.match(r"^/[A-Za-z]:[\\/]", raw):
+            raw = raw[1:]
         candidate = Path(raw).expanduser()
         if not candidate.is_absolute():
             candidate = root / candidate
@@ -1101,9 +1105,9 @@ def send_artifact_warning(
         names += f" 等 {len(failed)} 个文件"
     english = project_language(project) == "en"
     text = (
-        f"Some attachments were not delivered ({names}). Open the Feishu document fallback or ask Codex to retry."
+        f"Some attachments were not delivered ({names}). Ask Codex to retry and confirm that the attachment appears before relying on it."
         if english
-        else f"部分附件未送达（{names}）。可打开飞书文档中的备用链接，或让 Codex 重试。"
+        else f"部分附件未送达（{names}）。请让 Codex 重试，并在确认附件实际出现后再使用。"
     )
     try:
         client.send_post(project["chat_id"], text, f"{base_uuid[:35]}-artifact-warn")
@@ -1159,11 +1163,23 @@ def reply_complete(
                 artifact_label = "Attachments" if english else "附件与产物"
                 lines = [f"[{item['name']}]({item['url']})" for item in fallback_artifacts]
                 text += f"\n\n{artifact_label}：" + " · ".join(lines)
+            known_missing = remaining_artifact_failures(
+                image_upload_failures + file_upload_failures,
+                fallback_artifacts,
+            )
+            if known_missing:
+                names = "、".join(path.name for path in known_missing[:5])
+                notice = (
+                    f"Attachments were not delivered ({names}); the document and text result are still available."
+                    if english
+                    else f"附件未送达（{names}）；飞书文档和文字结果仍可查看。"
+                )
+                text = notice + "\n\n" + text
             client.reply_post(message_id, text, base_uuid)
             image_reply_failures = reply_inline_images(client, message_id, uploaded_images, base_uuid, log_path)
             file_reply_failures = reply_inline_files(client, message_id, uploaded_files, base_uuid, log_path)
             failed_artifacts = remaining_artifact_failures(
-                image_upload_failures + file_upload_failures + image_reply_failures + file_reply_failures,
+                image_reply_failures + file_reply_failures,
                 fallback_artifacts,
             )
             send_artifact_warning(
@@ -1177,11 +1193,13 @@ def reply_complete(
         except Exception:
             append_log(log_path, "document publish failed; falling back to message chunks:\n" + traceback.format_exc())
     parts = chunks(answer)
-    if should_publish_document(source, answer) and (image_upload_failures or file_upload_failures):
+    upload_failures = image_upload_failures + file_upload_failures
+    if upload_failures:
+        names = "、".join(path.name for path in upload_failures[:5])
         warning = (
-            "Attachment upload failed; the text result follows, but local artifacts were not delivered.\n\n"
+            f"Attachments were not delivered ({names}); the text result follows.\n\n"
             if project_language(project) == "en"
-            else "附件上传失败；以下先返回文字结果，本地产物未送达。\n\n"
+            else f"附件未送达（{names}）；以下仅返回文字结果。\n\n"
         )
         parts[0] = warning + parts[0]
     client.reply_post(message_id, parts[0], base_uuid)
@@ -1190,7 +1208,7 @@ def reply_complete(
     send_artifact_warning(
         client,
         project,
-        image_upload_failures + file_upload_failures + image_reply_failures + file_reply_failures,
+        image_reply_failures + file_reply_failures,
         base_uuid,
         log_path,
     )

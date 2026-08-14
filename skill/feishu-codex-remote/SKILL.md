@@ -15,7 +15,7 @@ Accept a request such as:
 
 Treat the current canonical working directory as the project to bind. Never infer or switch to another directory from Feishu message text.
 
-Before changing the machine, say briefly what will happen and that the user may need to scan a Feishu QR code. Then follow [setup.md](references/setup.md). Concentrate unavoidable human actions—QR login, consent, CAPTCHA, tenant-admin approval, or secure secret entry—at the beginning.
+Before changing the machine, say briefly what will happen and that the user may need to scan a Feishu QR code. Then follow [setup.md](references/setup.md). Concentrate unavoidable human actions—QR login, consent, CAPTCHA, required app-permission approval, tenant-admin approval, or secure secret entry—at the beginning. Treat native image/file upload permission as an installation prerequisite, not a repair suggestion after delivery fails. Do not announce a successful connection until a real image has been received in the bound Feishu group.
 
 ## Reuse The Feishu Application First
 

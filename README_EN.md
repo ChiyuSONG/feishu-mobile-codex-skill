@@ -50,11 +50,11 @@ Open the local project you want to connect in Codex, then send:
 Codex handles the remaining configuration. You normally only need to follow its prompts to:
 
 1. Scan a QR code or sign in to Feishu;
-2. Select the correct Feishu account and approve access;
+2. Select the correct Feishu account and approve the permissions needed for messages, images/files, and private documents; ask a tenant administrator to approve them if your tenant requires it;
 3. Copy a Feishu app credential once when necessary;
 4. Confirm a Codex security prompt during the first startup.
 
-The Feishu group receives a welcome message when the connection succeeds.
+Codex first sends a real test image to the bound group. The connection is successful only after you can see that image in Feishu; the group then receives the welcome message. If a permission is missing, Codex asks for it at this stage instead of treating a failed upload as completed setup.
 
 ## How to use it in Feishu
 

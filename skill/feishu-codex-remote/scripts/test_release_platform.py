@@ -18,6 +18,34 @@ import remote_gateway
 import uninstall
 
 
+SKILL_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = SKILL_ROOT.parents[1]
+
+
+class SetupContractTests(unittest.TestCase):
+    def test_native_media_permission_is_an_installation_preflight(self):
+        skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+        setup = (SKILL_ROOT / "references" / "setup.md").read_text(encoding="utf-8")
+        self.assertIn("installation prerequisite", skill)
+        self.assertIn("installation preflight gate", setup)
+        self.assertIn("im:resource", setup)
+        self.assertIn("Do not continue to project binding, welcome, or the success report", setup)
+
+    def test_setup_success_requires_a_visible_real_image_before_welcome(self):
+        setup = (SKILL_ROOT / "references" / "setup.md").read_text(encoding="utf-8")
+        visible = setup.index("user confirms the image is visible")
+        welcome = setup.index("Only then send the Feishu welcome message")
+        self.assertLess(visible, welcome)
+
+    def test_readmes_disclose_permission_and_real_image_acceptance(self):
+        chinese = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        english = (REPO_ROOT / "README_EN.md").read_text(encoding="utf-8")
+        self.assertIn("图片/文件和私有文档所需权限", chinese)
+        self.assertIn("真实测试图片", chinese)
+        self.assertIn("permissions needed for messages, images/files, and private documents", english)
+        self.assertIn("real test image", english)
+
+
 class PlatformTests(unittest.TestCase):
     def test_startup_hook_preserves_existing_hooks_and_is_idempotent(self):
         existing = {

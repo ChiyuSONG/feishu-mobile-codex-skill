@@ -51,6 +51,14 @@ RELOAD_RESPONSES = REMOTE_STATE / "reload_responses"
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).expanduser()
 AUTOMATIONS_ROOT = CODEX_HOME / "automations"
 CODEX_STATE_DB = Path.home() / ".codex" / "state_5.sqlite"
+DEFAULT_PERMISSION_MODE = "full-access"
+PROJECT_ONLY_PERMISSION_MODE = "project-only-auto"
+AUTO_REVIEW_PERMISSION_MODE = "auto-review"
+PERMISSION_MODES = {
+    DEFAULT_PERMISSION_MODE,
+    PROJECT_ONLY_PERMISSION_MODE,
+    AUTO_REVIEW_PERMISSION_MODE,
+}
 
 
 def cli_json_dumps(value: Any) -> str:
@@ -515,6 +523,13 @@ def project_language(project: dict[str, Any]) -> str:
     return "en" if value.startswith("en") else "zh-CN"
 
 
+def project_permission_mode(project: dict[str, Any]) -> str:
+    mode = str(project.get("agent_permission_mode") or DEFAULT_PERMISSION_MODE).strip()
+    if mode not in PERMISSION_MODES:
+        raise GatewayError(f"Unsupported remote permission mode: {mode}")
+    return mode
+
+
 def hourly_catch_up_project_keys(workers: dict[str, Any]) -> list[str]:
     return [key for key, worker in workers.items() if project_hourly_catch_up_enabled(worker.project)]
 
@@ -535,6 +550,7 @@ def build_prompt(
     attachment_lines = "\n".join(f"- {path}" for path in attachments) or "- 无"
     workspace_mode = project_workspace_mode(project)
     workspace_label = "General 日常问答" if workspace_mode == "general" else "本地项目"
+    permission_mode = project_permission_mode(project)
     initial = ""
     if first_turn and workspace_mode == "general":
         initial = "这是独立的 General 问答线程；内部运行目录仅用于隔离临时文件，不代表本地项目。不要扫描或猜测其他目录。"
@@ -554,6 +570,7 @@ def build_prompt(
 - 远程 Codex 模型: {project.get('agent_model') or '继承用户级 Codex 配置'}
 - 推理等级: {project.get('agent_reasoning_effort') or '继承用户级 Codex 配置'}
 - 加速档位: {project.get('agent_service_tier') or '继承用户级 Codex 配置'}
+- 执行权限: {permission_mode}
 - 对应桌面对话仅作主题标识: {project.get('bootstrap_source_thread_id') or '无'}
 - Feishu message_id: {item['message_id']}
 
@@ -561,7 +578,7 @@ def build_prompt(
 
 执行规则：
 1. {scope_rule}
-2. 普通项目操作使用 Codex 的自动审批。不要自行创建命令白名单。
+2. Full Access 是本地 Codex 进程的技术执行能力，不扩大任务范围。普通操作自动执行，不等待工具审批；仍只处理当前绑定项目，不访问无关项目。不要自行创建命令白名单。
 3. 已配置 Codex 账号的正常额度、模型、推理等级、Fast 和 heartbeat 属于已授权的 Codex 使用；只有新购或升级飞书会员、云资源、独立 API 账单等外部付费生命周期，才需先说明费用、续费和生命周期并等待批准。
 4. 禁止公网暴露对话、文档、链接、存储或服务。
 5. 常规项目内权限和安全配置可以自动处理并在回复中说明；账号/租户管理员提权、跨项目授权、凭据泄露、关闭 MFA/审计/Defender/防火墙、移除最后恢复管理员、越界持久提权必须停下并告诉用户。
@@ -603,7 +620,6 @@ def build_codex_command(
     command = [
         str(codex_cli_path()),
         "exec",
-        "--approve-for-me",
         "--skip-git-repo-check",
         "--disable",
         "hooks",
@@ -613,6 +629,31 @@ def build_codex_command(
         "-o",
         str(final_path),
     ]
+    permission_mode = project_permission_mode(project)
+    if permission_mode == DEFAULT_PERMISSION_MODE:
+        command.extend(
+            [
+                "--sandbox",
+                "danger-full-access",
+                "--config",
+                'approval_policy="never"',
+            ]
+        )
+    elif permission_mode == PROJECT_ONLY_PERMISSION_MODE:
+        command.extend(
+            [
+                "--sandbox",
+                "workspace-write",
+                "--config",
+                'approval_policy="never"',
+                "--config",
+                "sandbox_workspace_write.network_access=true",
+                "--add-dir",
+                str(SCRIPT_DIR.parent),
+            ]
+        )
+    else:
+        command.append("--approve-for-me")
     model = str(project.get("agent_model") or "").strip()
     reasoning_effort = str(project.get("agent_reasoning_effort") or "").strip()
     service_tier = str(project.get("agent_service_tier") or "").strip()
@@ -1712,9 +1753,35 @@ def init_project(args: argparse.Namespace) -> dict[str, Any]:
         "bootstrap_source_thread_id": args.bootstrap_source_thread_id or "",
         "registered_epoch": now_epoch(),
         "timeout_seconds": args.timeout_seconds,
+        "agent_permission_mode": args.permission_mode,
     }
     atomic_write_json(CONFIG_PATH, config)
-    return {"ok": True, "config": str(CONFIG_PATH), "project": config["projects"][args.project_key]}
+    notice = (
+        "Default Full Access lets the local Codex process access the whole machine without interactive approvals. "
+        "Task scope and safety rules still bind it to this project. Ask in conversation to switch to "
+        "project-only-auto or auto-review at any time."
+    )
+    return {
+        "ok": True,
+        "config": str(CONFIG_PATH),
+        "project": config["projects"][args.project_key],
+        "permission_notice": notice,
+    }
+
+
+def set_project_permission(args: argparse.Namespace) -> dict[str, Any]:
+    config = load_config()
+    assert_config(config)
+    project = config["projects"].get(args.project_key)
+    if not isinstance(project, dict):
+        raise GatewayError(f"Unknown remote project: {args.project_key}")
+    project["agent_permission_mode"] = args.permission_mode
+    atomic_write_json(CONFIG_PATH, config)
+    return {
+        "ok": True,
+        "project_key": args.project_key,
+        "agent_permission_mode": project_permission_mode(project),
+    }
 
 
 def create_chat(args: argparse.Namespace) -> dict[str, Any]:
@@ -1772,6 +1839,7 @@ def status() -> dict[str, Any]:
             "working_directory": project.get("working_directory"),
             "chat_id": project.get("chat_id"),
             "thread_id": store.thread_id(),
+            "agent_permission_mode": project_permission_mode(project),
             "counts": counts,
             "cursor": store.state.get("cursor"),
         }
@@ -2246,6 +2314,11 @@ def parser() -> argparse.ArgumentParser:
     initialize.add_argument("--focus", required=True)
     initialize.add_argument("--bootstrap-source-thread-id")
     initialize.add_argument("--timeout-seconds", type=int, default=3600)
+    initialize.add_argument(
+        "--permission-mode",
+        choices=tuple(sorted(PERMISSION_MODES)),
+        default=DEFAULT_PERMISSION_MODE,
+    )
     create = commands.add_parser("create-chat")
     create.add_argument("--project-key", required=True)
     create.add_argument("--owner-open-id", required=True)
@@ -2256,6 +2329,9 @@ def parser() -> argparse.ArgumentParser:
     profile.add_argument("--model", required=True)
     profile.add_argument("--reasoning-effort", required=True)
     profile.add_argument("--service-tier")
+    permission = commands.add_parser("set-project-permission")
+    permission.add_argument("--project-key", required=True)
+    permission.add_argument("--permission-mode", choices=tuple(sorted(PERMISSION_MODES)), required=True)
     desktop = commands.add_parser("desktop-context")
     desktop.add_argument("--project-key", required=True)
     desktop.add_argument("--thread-id")
@@ -2333,6 +2409,8 @@ def main(argv: list[str] | None = None) -> int:
             value = send_welcome(args)
         elif args.command == "set-project-profile":
             value = set_project_profile(args)
+        elif args.command == "set-project-permission":
+            value = set_project_permission(args)
         elif args.command == "desktop-context":
             value = desktop_context(args)
         elif args.command == "feishu-context":

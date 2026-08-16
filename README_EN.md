@@ -54,6 +54,8 @@ Codex handles the remaining configuration. You normally only need to follow its 
 3. Copy a Feishu app credential once when necessary;
 4. Confirm a Codex security prompt during the first startup.
 
+The default execution mode is Codex **Full Access**: the local Codex process can access the whole computer and run installed tools without per-command approval. This supports unattended long tasks, but mistakes or malicious instructions have a larger blast radius. Each Feishu group remains bound to one explicit project, and the paid-action, credential, public-exposure, destructive-action, and administrator-elevation gates remain in force. Before or after installation, say “use project-only access” or “use auto review” to lower the mode. This notice is disclosure, not an extra confirmation gate for the default setup.
+
 Codex first sends a real test image to the bound group. The connection is successful only after you can see that image in Feishu; the group then receives the welcome message. If a permission is missing, Codex asks for it at this stage instead of treating a failed upload as completed setup.
 
 ## How to use it in Feishu

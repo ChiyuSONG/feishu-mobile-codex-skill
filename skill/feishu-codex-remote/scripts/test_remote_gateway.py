@@ -321,6 +321,46 @@ class RoutingTests(unittest.TestCase):
         self.assertIn('service_tier="fast"', command[:resume_index])
         self.assertIn("features.fast_mode=true", command[:resume_index])
 
+    def test_full_access_is_the_default_non_interactive_mode(self):
+        with patch.object(remote_gateway, "codex_cli_path", return_value=Path("codex.exe")):
+            command = remote_gateway.build_codex_command(
+                {"working_directory": r"C:\project"},
+                Path("final.md"),
+                [],
+                "thread-1",
+            )
+        resume_index = command.index("resume")
+        self.assertLess(command.index("--sandbox"), resume_index)
+        self.assertEqual(command[command.index("--sandbox") + 1], "danger-full-access")
+        self.assertIn('approval_policy="never"', command[:resume_index])
+        self.assertNotIn("--approve-for-me", command)
+        self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", command)
+
+    def test_lower_permission_modes_remain_available(self):
+        with patch.object(remote_gateway, "codex_cli_path", return_value=Path("codex.exe")):
+            project_only = remote_gateway.build_codex_command(
+                {
+                    "working_directory": r"C:\project",
+                    "agent_permission_mode": "project-only-auto",
+                },
+                Path("final.md"),
+                [],
+                "thread-1",
+            )
+            auto_review = remote_gateway.build_codex_command(
+                {
+                    "working_directory": r"C:\project",
+                    "agent_permission_mode": "auto-review",
+                },
+                Path("final.md"),
+                [],
+                "thread-1",
+            )
+        self.assertEqual(project_only[project_only.index("--sandbox") + 1], "workspace-write")
+        self.assertIn("sandbox_workspace_write.network_access=true", project_only)
+        self.assertIn("--approve-for-me", auto_review)
+        self.assertNotIn('approval_policy="never"', auto_review)
+
     def test_project_model_settings_are_visible_in_prompt(self):
         prompt = remote_gateway.build_prompt(
             "demo",
@@ -337,6 +377,8 @@ class RoutingTests(unittest.TestCase):
         self.assertIn("远程 Codex 模型: gpt-5.6-sol", prompt)
         self.assertIn("推理等级: high", prompt)
         self.assertIn("加速档位: fast", prompt)
+        self.assertIn("执行权限: full-access", prompt)
+        self.assertIn("Full Access 是本地 Codex 进程的技术执行能力", prompt)
         self.assertIn("正常额度", prompt)
         self.assertIn("desktop-context --project-key demo", prompt)
 

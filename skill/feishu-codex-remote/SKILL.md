@@ -15,7 +15,7 @@ Accept a request such as:
 
 Treat the current canonical working directory as the project to bind. Never infer or switch to another directory from Feishu message text.
 
-Before changing the machine, say briefly what will happen and that the user may need to scan a Feishu QR code. Then follow [setup.md](references/setup.md). Concentrate unavoidable human actions—QR login, consent, CAPTCHA, required app-permission approval, tenant-admin approval, or secure secret entry—at the beginning. Treat native image/file upload permission as an installation prerequisite, not a repair suggestion after delivery fails. Do not announce a successful connection until a real image has been received in the bound Feishu group.
+Before changing the machine, say briefly what will happen and that the user may need to scan a Feishu QR code. Also give the first-run permission notice: the default is Codex `Full Access` (`danger-full-access` with no interactive approvals), which lets the local Codex process read, write, and run tools across the machine. Explain that task instructions still bind each group to its registered project and retain the safety gates below, but a malicious or mistaken instruction has a larger blast radius. Tell the user they can say “改成仅项目权限” / “use project-only access” or “改回逐次审批” / “use auto review” before or after setup. This is disclosure, not a blocking confirmation; continue with Full Access unless the user requests a lower mode. Then follow [setup.md](references/setup.md). Concentrate unavoidable human actions—QR login, consent, CAPTCHA, required app-permission approval, tenant-admin approval, or secure secret entry—at the beginning. Treat native image/file upload permission as an installation prerequisite, not a repair suggestion after delivery fails. Do not announce a successful connection until a real image has been received in the bound Feishu group.
 
 ## Reuse The Feishu Application First
 
@@ -73,13 +73,14 @@ Keep Chinese as the default and protect its existing welcome, inspection, remind
 
 ## Context And Safety
 
+- Default every registered project to `full-access`, implemented as `--sandbox danger-full-access` plus `approval_policy="never"`. This prevents routine local tools, installed CLIs, and long-running work from stopping for Codex approvals. Keep `project-only-auto` (`workspace-write` with normal network access) and `auto-review` available as conversational downgrade modes. Full Access is a technical capability, not permission to cross the registered project scope.
 - Do not mirror Desktop chats into Feishu or Feishu chats into Desktop automatically. Use the scoped `desktop-context` or `feishu-context` bridge only when the user explicitly asks to continue or retrieve work from the other surface.
 - Keep credentials and runtime state outside the repository in the OS-specific user data directory. Store secrets in DPAPI or Keychain; never print or commit them.
 - Verify the selected Feishu tenant before creating chats, sending messages, or publishing documents.
 - Keep generated documents private. Close link sharing, read the setting back, and withhold the URL if verification fails.
 - Prohibit public endpoints and anonymous/public links by default.
 - Stop for tenant/account admin elevation, cross-project or cross-tenant access, credential disclosure, disabling core protections, irreversible history destruction, bulk/out-of-scope deletion, or a new external paid lifecycle.
-- Allow routine work inside the explicitly bound project under its existing Codex approval policy.
+- Allow routine work inside the explicitly bound project under its registered permission mode. Do not add command allowlists or hidden lower-level gates that contradict Full Access.
 
 ## Conversational Uninstall
 

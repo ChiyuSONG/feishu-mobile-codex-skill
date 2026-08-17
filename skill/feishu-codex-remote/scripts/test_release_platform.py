@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 from types import SimpleNamespace
 import subprocess
@@ -226,12 +227,31 @@ class FirstInspectionTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as raw:
             runtime = Path(raw) / "demo"
+            event_log = runtime / "runs" / "run-1" / "events.jsonl"
+            event_log.parent.mkdir(parents=True)
+            event_log.write_text(
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {"type": "agent_message", "text": "已完成数据整理。\n正在运行验证。"},
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
             remote_gateway.atomic_write_json(
                 runtime / "state.json",
                 {
                     "messages": {
                         "om_1": {"status": "pending"},
-                        "om_2": {"status": "processing"},
+                        "om_2": {
+                            "message_id": "om_2",
+                            "status": "processing",
+                            "batch_id": "batch-1",
+                            "processing_started_at": datetime.now().astimezone().isoformat(),
+                            "run_event_log": str(event_log),
+                        },
                         "om_3": {"status": "failed"},
                     }
                 },
@@ -242,7 +262,10 @@ class FirstInspectionTests(unittest.TestCase):
             ):
                 lines = remote_gateway.routine_inspection_text("demo").splitlines()
         self.assertEqual(len(lines), 3)
-        self.assertEqual(lines[0], "状态：Listener 正常，待处理 1，处理中 1，失败 1。")
+        self.assertIn("状态：Listener 正常，任务执行中", lines[0])
+        self.assertIn("最近进展：已完成数据整理。 正在运行验证。", lines[0])
+        self.assertIn("待处理 1，处理中 1，失败 1", lines[0])
+        self.assertNotIn("events.jsonl", lines[0])
         self.assertIn("Codex 用量：5小时额度剩余 80%", lines[1])
         self.assertIn("自然语言修改巡检内容", lines[2])
 
@@ -256,6 +279,32 @@ class FirstInspectionTests(unittest.TestCase):
             remote_gateway.inspection_report_uuid("demo", first),
             remote_gateway.inspection_report_uuid("demo", first + timedelta(hours=1)),
         )
+
+    def test_active_task_progress_uuid_is_idempotent_per_batch_and_hour(self):
+        first = datetime(2026, 8, 12, 10, 5, tzinfo=timezone.utc)
+        self.assertEqual(
+            remote_gateway.active_task_progress_uuid("demo", "batch-1", first),
+            remote_gateway.active_task_progress_uuid("demo", "batch-1", first + timedelta(minutes=40)),
+        )
+        self.assertNotEqual(
+            remote_gateway.active_task_progress_uuid("demo", "batch-1", first),
+            remote_gateway.active_task_progress_uuid("demo", "batch-1", first + timedelta(hours=1)),
+        )
+        self.assertLessEqual(len(remote_gateway.active_task_progress_uuid("demo", "batch-1", first)), 50)
+
+    def test_progress_report_honors_hourly_opt_out_before_reading_state(self):
+        config = {
+            "projects": {
+                "demo": {
+                    "chat_id": "chat_1",
+                    "hourly_catch_up_enabled": False,
+                }
+            }
+        }
+        with patch.object(remote_gateway, "active_task_progress_snapshot") as snapshot:
+            result = remote_gateway.send_active_task_progress_report(config, "demo")
+        self.assertEqual(result["reason"], "hourly-disabled")
+        snapshot.assert_not_called()
 
     def test_english_routine_inspection_is_three_lines(self):
         limits = {

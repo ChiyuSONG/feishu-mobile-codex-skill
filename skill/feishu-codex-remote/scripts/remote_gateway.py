@@ -295,6 +295,206 @@ def project_runtime(project_key: str) -> Path:
     return REMOTE_STATE / "projects" / project_key
 
 
+def _parse_local_datetime(value: Any) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value or ""))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.now().astimezone().tzinfo)
+    return parsed.astimezone()
+
+
+def _elapsed_text(started_at: Any, at: datetime | None = None, language: str = "zh-CN") -> str:
+    started = _parse_local_datetime(started_at)
+    current = (at or datetime.now().astimezone()).astimezone()
+    seconds = max(0, int((current - started).total_seconds())) if started else 0
+    minutes = seconds // 60
+    hours, minutes = divmod(minutes, 60)
+    if language == "en":
+        if hours:
+            return f"{hours}h {minutes}m"
+        return f"{max(1, minutes)}m"
+    if hours:
+        return f"{hours}小时{minutes}分钟"
+    return f"{max(1, minutes)}分钟"
+
+
+def _jsonl_tail(path: Path, max_bytes: int = 2 * 1024 * 1024) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            start = max(0, size - max_bytes)
+            handle.seek(start)
+            payload = handle.read()
+        if start:
+            newline = payload.find(b"\n")
+            payload = payload[newline + 1 :] if newline >= 0 else b""
+    except OSError:
+        return []
+    records: list[dict[str, Any]] = []
+    for raw in payload.splitlines():
+        try:
+            value = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if isinstance(value, dict):
+            records.append(value)
+    return records
+
+
+def _latest_run_event_log(project_key: str, started_at: Any = None) -> Path | None:
+    run_root = project_runtime(project_key) / "runs"
+    try:
+        candidates = [path for path in run_root.glob("*/events.jsonl") if path.is_file()]
+        started = _parse_local_datetime(started_at)
+        if started is not None:
+            candidates = [path for path in candidates if path.stat().st_mtime >= started.timestamp()]
+        return max(candidates, key=lambda path: path.stat().st_mtime) if candidates else None
+    except OSError:
+        return None
+
+
+def _one_line_progress_text(value: Any, limit: int = 240) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    text = re.sub(r"(?i)(?:/?[a-z]:[\\/])[^\s，。；;）)]*", "[redacted path]", text)
+    text = re.sub(r"\b(?:om|oc|ou)_[A-Za-z0-9]+\b", "[redacted id]", text)
+    text = re.sub(
+        r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b",
+        "[redacted id]",
+        text,
+    )
+    text = re.sub(r"(?i)\b(?:sk-[A-Za-z0-9_-]{8,}|AKIA[A-Z0-9]{12,}|LTAI[A-Za-z0-9]{8,})\b", "[redacted secret]", text)
+    text = re.sub(
+        r"`([^`]+)`",
+        lambda match: "[redacted command]"
+        if re.search(r"[\\/]|--|\s|\.(?:exe|ps1|bat|cmd|sh|py)\b", match.group(1), re.IGNORECASE)
+        else match.group(0),
+        text,
+    )
+    if len(text) > limit:
+        text = text[: limit - 1].rstrip() + "…"
+    return text
+
+
+def _event_progress_detail(records: list[dict[str, Any]], language: str = "zh-CN") -> str:
+    latest_item: dict[str, Any] | None = None
+    latest_event_type = ""
+    latest_agent_text = ""
+    for record in reversed(records):
+        item = record.get("item")
+        if latest_item is None and isinstance(item, dict):
+            latest_item = item
+            latest_event_type = str(record.get("type") or "")
+        if not latest_agent_text and isinstance(item, dict) and item.get("type") == "agent_message":
+            text = _one_line_progress_text(item.get("text"))
+            if text:
+                latest_agent_text = text
+    generic = "Codex is still running" if language == "en" else "Codex 仍在执行"
+    if latest_item is not None:
+        item_type = str(latest_item.get("type") or "")
+        in_progress = latest_event_type.endswith("started") or latest_item.get("status") == "in_progress"
+        if language == "en":
+            if item_type == "command_execution":
+                generic = "running a project command or validation" if in_progress else "a project command or validation just finished"
+            elif item_type == "file_change":
+                generic = "updating project files" if in_progress else "a project file update just finished"
+            elif item_type in {"mcp_tool_call", "web_search"}:
+                generic = "using a tool or checking external information"
+        else:
+            if item_type == "command_execution":
+                generic = "正在运行项目命令或验证" if in_progress else "刚完成一项项目命令或验证"
+            elif item_type == "file_change":
+                generic = "正在修改项目文件" if in_progress else "刚完成一项文件修改"
+            elif item_type in {"mcp_tool_call", "web_search"}:
+                generic = "正在调用工具或核验外部信息"
+    if latest_agent_text:
+        if latest_item is not None and latest_item.get("type") != "agent_message":
+            connector = "; current: " if language == "en" else "；当前："
+            return latest_agent_text + connector + generic
+        return latest_agent_text
+    return generic
+
+
+def active_task_progress_snapshot(
+    project_key: str,
+    at: datetime | None = None,
+    language: str = "zh-CN",
+) -> dict[str, Any] | None:
+    state = load_json(project_runtime(project_key) / "state.json", {})
+    processing = [
+        dict(item)
+        for item in (state.get("messages") or {}).values()
+        if item.get("status") == "processing"
+    ]
+    if not processing:
+        return None
+    processing.sort(key=lambda item: (str(item.get("processing_started_at") or ""), str(item.get("message_id") or "")))
+    batch_id = str(processing[0].get("batch_id") or processing[0].get("message_id") or "active")
+    batch = [item for item in processing if str(item.get("batch_id") or item.get("message_id") or "active") == batch_id]
+    event_log_value = next((item.get("run_event_log") for item in batch if item.get("run_event_log")), None)
+    event_log = (
+        Path(str(event_log_value))
+        if event_log_value
+        else _latest_run_event_log(project_key, processing[0].get("processing_started_at"))
+    )
+    records = _jsonl_tail(event_log) if event_log else []
+    return {
+        "project_key": project_key,
+        "batch_id": batch_id,
+        "message_count": len(batch),
+        "started_at": processing[0].get("processing_started_at"),
+        "elapsed": _elapsed_text(processing[0].get("processing_started_at"), at, language),
+        "detail": _event_progress_detail(records, language),
+    }
+
+
+def active_task_progress_text(snapshot: dict[str, Any], language: str = "zh-CN") -> str:
+    count = int(snapshot.get("message_count") or 1)
+    detail = _one_line_progress_text(snapshot.get("detail"))
+    if language == "en":
+        batch = f" ({count} queued messages in this batch)" if count > 1 else ""
+        return f"Task progress: running{batch} for {snapshot['elapsed']}; latest progress: {detail}."
+    batch = f"（本批次 {count} 条消息）" if count > 1 else ""
+    return f"任务进度：执行中{batch}，已运行 {snapshot['elapsed']}；最近进展：{detail}。"
+
+
+def active_task_progress_uuid(project_key: str, batch_id: str, at: datetime | None = None) -> str:
+    bucket = (at or datetime.now().astimezone()).astimezone().strftime("%Y%m%d%H")
+    digest = hashlib.sha256(f"{project_key}\0{batch_id}\0{bucket}".encode("utf-8")).hexdigest()[:28]
+    return "codex-progress-" + digest
+
+
+def send_active_task_progress_report(config: dict[str, Any], project_key: str) -> dict[str, Any]:
+    project = config["projects"].get(project_key)
+    if not isinstance(project, dict) or not project.get("chat_id"):
+        raise GatewayError(f"Remote project has no Feishu chat binding: {project_key}")
+    if not project_hourly_catch_up_enabled(project):
+        return {"ok": True, "sent": False, "reason": "hourly-disabled"}
+    language = project_language(project)
+    snapshot = active_task_progress_snapshot(project_key, language=language)
+    if snapshot is None:
+        return {"ok": True, "sent": False, "reason": "idle"}
+    app_id, secret = load_app_credentials(config)
+    client = FeishuClient(app_id, secret)
+    tenant = client.tenant_info()
+    if str(tenant.get("tenant_key") or "") != str(config["expected_tenant_key"]):
+        raise GatewayError("Refusing to send task progress in an unexpected tenant")
+    text = active_task_progress_text(snapshot, language)
+    payload = client.send_post(
+        str(project["chat_id"]),
+        text,
+        active_task_progress_uuid(project_key, str(snapshot["batch_id"])),
+    )
+    message_id = str((payload.get("data") or {}).get("message_id") or "")
+    if not message_id:
+        raise GatewayError(f"Task progress report returned no message_id: {payload}")
+    return {"ok": True, "sent": True, "message_id": message_id, "text": text}
+
+
 def ignore_message(message: dict[str, Any]) -> bool:
     sender = message.get("sender") or {}
     sender_type = str(sender.get("sender_type") or "").lower()
@@ -432,6 +632,20 @@ class ProjectStore:
             item.update(fields)
             item["updated_at"] = now_iso()
             self.save()
+
+    def record_run(self, message_ids: list[str], event_log: Path) -> None:
+        with self.lock:
+            changed = False
+            for message_id in message_ids:
+                item = self.state.get("messages", {}).get(message_id)
+                if not isinstance(item, dict):
+                    continue
+                item["run_event_log"] = str(event_log)
+                item["run_started_at"] = now_iso()
+                item["updated_at"] = now_iso()
+                changed = True
+            if changed:
+                self.save()
 
     def thread_id(self) -> str:
         return str(self.state.get("thread_id") or "")
@@ -683,6 +897,8 @@ def run_codex(project_key: str, project: dict[str, Any], store: ProjectStore, it
     run_dir.mkdir(parents=True, exist_ok=True)
     final_path = run_dir / "final.md"
     event_log = run_dir / "events.jsonl"
+    message_ids = [str(value) for value in (item.get("batch_message_ids") or [item.get("message_id")]) if value]
+    store.record_run(message_ids, event_log)
     thread_id = store.thread_id()
     command = build_codex_command(project, final_path, attachments, thread_id)
     prompt = build_prompt(
@@ -932,12 +1148,19 @@ def inspection_counts(project_key: str) -> dict[str, int]:
 def first_inspection_text(project_key: str, language: str = "zh-CN") -> str:
     counts = inspection_counts(project_key)
     active = counts.get("pending", 0) + counts.get("processing", 0)
+    progress = active_task_progress_snapshot(project_key, language=language)
     if language == "en":
-        current = (
-            f"Listener ready | {active} queued message(s) found; processing has been triggered."
-            if active
-            else "Listener ready | no queued messages."
-        )
+        if progress:
+            current = (
+                f"Listener ready | task running for {progress['elapsed']}; "
+                f"latest progress: {_one_line_progress_text(progress['detail'])}."
+            )
+        else:
+            current = (
+                f"Listener ready | {active} queued message(s) found; processing has been triggered."
+                if active
+                else "Listener ready | no queued messages."
+            )
         return (
             "**First automatic inspection completed**\n\n"
             "It runs hourly by default while the computer and Codex are available, starts or checks the Listener, "
@@ -947,11 +1170,17 @@ def first_inspection_text(project_key: str, language: str = "zh-CN") -> str:
             "Ask to pause, resume, change the inspection, or add a reminder.\n\n"
             "Each inspection starts a lightweight Codex run and consumes the corresponding Codex usage."
         )
-    current = (
-        f"Listener 已就绪｜发现 {active} 条待处理消息，已经触发处理。"
-        if active
-        else "Listener 已就绪｜当前没有待处理消息。"
-    )
+    if progress:
+        current = (
+            f"Listener 已就绪｜任务执行中，已运行 {progress['elapsed']}；"
+            f"最近进展：{_one_line_progress_text(progress['detail'])}。"
+        )
+    else:
+        current = (
+            f"Listener 已就绪｜发现 {active} 条待处理消息，已经触发处理。"
+            if active
+            else "Listener 已就绪｜当前没有待处理消息。"
+        )
     return (
         "**自动巡检首次运行成功**\n\n"
         "默认每小时运行一次。在电脑和 Codex 可用时，它会检查并按需启动 Listener、"
@@ -998,12 +1227,21 @@ def send_first_inspection_message(config: dict[str, Any], project_key: str) -> d
 
 def routine_inspection_text(project_key: str, language: str = "zh-CN") -> str:
     counts = inspection_counts(project_key)
+    progress = active_task_progress_snapshot(project_key, language=language)
     if language == "en":
-        status = (
-            "Status: Listener healthy; "
-            f"pending {counts.get('pending', 0)}, processing {counts.get('processing', 0)}, "
-            f"failed {counts.get('failed', 0)}."
-        )
+        if progress:
+            status = (
+                f"Status: Listener healthy; task running for {progress['elapsed']}; "
+                f"latest progress: {_one_line_progress_text(progress['detail'])}; "
+                f"pending {counts.get('pending', 0)}, processing {counts.get('processing', 0)}, "
+                f"failed {counts.get('failed', 0)}."
+            )
+        else:
+            status = (
+                "Status: Listener healthy; "
+                f"pending {counts.get('pending', 0)}, processing {counts.get('processing', 0)}, "
+                f"failed {counts.get('failed', 0)}."
+            )
         try:
             usage = format_codex_usage(codex_rate_limits(), "en")
         except Exception:
@@ -1011,11 +1249,19 @@ def routine_inspection_text(project_key: str, language: str = "zh-CN") -> str:
         usage = usage.rstrip(".") + "."
         tip = "Tip: use natural language to change this inspection, add reminders, or create other custom behavior."
         return "\n".join((status, usage, tip))
-    status = (
-        "状态：Listener 正常，"
-        f"待处理 {counts.get('pending', 0)}，处理中 {counts.get('processing', 0)}，"
-        f"失败 {counts.get('failed', 0)}。"
-    )
+    if progress:
+        status = (
+            f"状态：Listener 正常，任务执行中，已运行 {progress['elapsed']}；"
+            f"最近进展：{_one_line_progress_text(progress['detail'])}；"
+            f"待处理 {counts.get('pending', 0)}，处理中 {counts.get('processing', 0)}，"
+            f"失败 {counts.get('failed', 0)}。"
+        )
+    else:
+        status = (
+            "状态：Listener 正常，"
+            f"待处理 {counts.get('pending', 0)}，处理中 {counts.get('processing', 0)}，"
+            f"失败 {counts.get('failed', 0)}。"
+        )
     try:
         usage = format_codex_usage(codex_rate_limits())
     except Exception:
@@ -2132,6 +2378,14 @@ def request_sync(args: argparse.Namespace) -> dict[str, Any]:
     elif getattr(args, "first_inspection_message", False):
         for key in project_keys:
             inspection_reports[key] = send_first_inspection_message(config, key)
+    progress_reports: dict[str, Any] = {}
+    if getattr(args, "request_only", False):
+        for key in project_keys:
+            inspection = inspection_reports.get(key) or {}
+            if inspection.get("message_id") and not inspection.get("skipped"):
+                progress_reports[key] = {"ok": True, "sent": False, "reason": "included-in-inspection"}
+            else:
+                progress_reports[key] = send_active_task_progress_report(config, key)
     reminder_reports: dict[str, Any] = {}
     for key in project_keys:
         reminder_reports[key] = send_due_reminders(config, key)
@@ -2144,6 +2398,7 @@ def request_sync(args: argparse.Namespace) -> dict[str, Any]:
             "added": response.get("added") or {},
             "usage_reports": usage_reports,
             "inspection_reports": inspection_reports,
+            "progress_reports": progress_reports,
             "reminder_reports": reminder_reports,
         }
 
@@ -2175,6 +2430,7 @@ def request_sync(args: argparse.Namespace) -> dict[str, Any]:
                 "counts": counts,
                 "usage_reports": usage_reports,
                 "inspection_reports": inspection_reports,
+                "progress_reports": progress_reports,
                 "reminder_reports": reminder_reports,
             }
         if time.monotonic() >= deadline:
@@ -2219,7 +2475,7 @@ def request_reload(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def automation_prompt(project_key: str, working_directory: str, report_usage: bool = True) -> str:
-    report_text = "并向项目飞书群发送默认三句巡检报告。" if report_usage else ""
+    report_text = "并向项目飞书群发送默认三句巡检报告，其中运行中任务的当前进度写在第一句。" if report_usage else "如有任务正在执行，会向项目飞书群报告当前进度。"
     if platform.system() == "Windows":
         script = SCRIPT_DIR / "sync_feishu.ps1"
         report_flag = " -InspectionReport" if report_usage else " -FirstInspectionMessage"

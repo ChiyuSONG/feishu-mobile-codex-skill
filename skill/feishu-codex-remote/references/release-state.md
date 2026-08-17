@@ -45,7 +45,7 @@ Keep the first Feishu message close to this form. Show the local folder name, no
 > - 发错时请另发更正；编辑或撤回不会被当作更正或取消指令
 > - 想调整现有行为或增加功能，直接告诉 Codex；不同群可以分别定制
 > - 直接说“从明天 10 点开始每小时提醒我……”或“已完成，取消提醒”
-> **自动巡检默认每小时运行一次**：首次会正式说明；此后默认用三句报告状态、Token 用量和自然语言定制提示。你也可以直接要求调整内容或频率、暂停或恢复自动巡检。
+> **自动巡检默认每小时运行一次**：首次会正式说明；此后默认用三句报告状态、Token 用量和自然语言定制提示。任务正在执行时，状态句还会显示已运行时间和最近一条安全进展。你也可以直接要求调整内容或频率、暂停或恢复自动巡检。
 
 Do not describe the group name as the binding key. Do not show commands, configuration variables, app IDs, chat IDs, or internal thread concepts unless the user is diagnosing a problem.
 
@@ -69,7 +69,7 @@ Generalize the proven reminder interaction without importing project-specific he
 | One-prompt installer | Skill workflow and runtime bootstrap implemented; real clean-machine/CUA onboarding not yet accepted |
 | QR/login-based Feishu authorization | Browser OAuth with a localhost callback is implemented and can use Feishu's QR login when offered; real clean-account testing remains |
 | CUA/browser-assisted Feishu console setup | Procedure defined; real console navigation not yet accepted |
-| Hourly automatic inspection and default three-line Token/status report | Implemented with a one-time formal explanation and hourly idempotent recurring report |
+| Hourly automatic inspection and default three-line Token/status report | Implemented with a one-time formal explanation, hourly idempotent recurring report, and non-blocking active-task progress in the status line |
 | Listener start on Codex session startup/resume | Implemented as a merge-safe user-level SessionStart Hook; real Desktop trust/startup test pending |
 | Chinese and English | Chinese remains the default; English welcome, inspection, reminder, usage and document-link text are implemented; real bilingual Feishu test pending |
 | Deterministic natural-language changes to inspection schedule | Not implemented; do not promise a specific sub-hour cadence until Codex Automation support is verified |

@@ -254,13 +254,20 @@ class RoutingTests(unittest.TestCase):
                     "send_codex_usage_report",
                     return_value={"message_id": "usage_1", "text": "Codex 用量"},
                 ) as report,
+                patch.object(
+                    remote_gateway,
+                    "send_active_task_progress_report",
+                    return_value={"sent": True, "message_id": "progress_1"},
+                ) as progress,
             ):
                 result = remote_gateway.request_sync(args)
 
         self.assertEqual(result["status"], "accepted")
         self.assertEqual(result["added"], {"demo": 2})
         self.assertEqual(result["usage_reports"]["demo"]["message_id"], "usage_1")
+        self.assertEqual(result["progress_reports"]["demo"]["message_id"], "progress_1")
         report.assert_called_once_with(config, "demo")
+        progress.assert_called_once_with(config, "demo")
 
     def test_sync_request_sends_default_inspection_report(self):
         config = {
@@ -296,15 +303,23 @@ class RoutingTests(unittest.TestCase):
                     "send_default_inspection_message",
                     return_value={"message_id": "inspection_1", "kind": "routine"},
                 ) as report,
+                patch.object(remote_gateway, "send_active_task_progress_report") as progress,
             ):
                 result = remote_gateway.request_sync(args)
         self.assertEqual(result["inspection_reports"]["demo"]["message_id"], "inspection_1")
+        self.assertEqual(result["progress_reports"]["demo"]["reason"], "included-in-inspection")
         report.assert_called_once_with(config, "demo")
+        progress.assert_not_called()
 
     def test_codex_execution_has_no_gateway_wall_clock_timeout(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
-            store = SimpleNamespace(root=root, thread_id=lambda: "thread-1")
+            recorded: list[tuple[list[str], Path]] = []
+            store = SimpleNamespace(
+                root=root,
+                thread_id=lambda: "thread-1",
+                record_run=lambda message_ids, event_log: recorded.append((message_ids, event_log)),
+            )
 
             def complete(command, **_kwargs):
                 final_path = Path(command[command.index("-o") + 1])
@@ -324,6 +339,8 @@ class RoutingTests(unittest.TestCase):
                 )
 
         self.assertEqual((answer, thread_id), ("done", "thread-1"))
+        self.assertEqual(recorded[0][0], ["om_1"])
+        self.assertEqual(recorded[0][1].name, "events.jsonl")
         self.assertNotIn("timeout", run.call_args.kwargs)
 
     def test_project_model_settings_are_explicit_parent_command_options(self):

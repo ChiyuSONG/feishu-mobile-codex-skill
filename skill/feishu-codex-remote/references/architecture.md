@@ -16,6 +16,7 @@ Use one verified compatible Feishu application across additional groups by defau
 - Hook installation does not alter project-level hourly inspection, Token usage reporting, reminders, or other scheduled work. Those remain independently configured per workstream.
 - Queue by Feishu `message_id`; ignore duplicate, bot, and system messages.
 - Claim atomically, retry visibly, and retain terminal failures for diagnosis.
+- Do not impose a gateway wall-clock timeout on the serialized `codex exec` process. Multi-hour work is valid; wait for Codex to exit or report its own terminal failure.
 - Preserve pending work through reloads. Drain current work before graceful restart.
 - Coalesce a short ordinary burst without losing source IDs. Keep forced isolation and conflicting response modes separate.
 

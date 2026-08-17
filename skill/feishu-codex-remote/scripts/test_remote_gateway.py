@@ -301,6 +301,31 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(result["inspection_reports"]["demo"]["message_id"], "inspection_1")
         report.assert_called_once_with(config, "demo")
 
+    def test_codex_execution_has_no_gateway_wall_clock_timeout(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            store = SimpleNamespace(root=root, thread_id=lambda: "thread-1")
+
+            def complete(command, **_kwargs):
+                final_path = Path(command[command.index("-o") + 1])
+                final_path.write_text("done", encoding="utf-8")
+                return SimpleNamespace(returncode=0)
+
+            with (
+                patch.object(remote_gateway, "codex_cli_path", return_value=Path("codex.exe")),
+                patch.object(remote_gateway.subprocess, "run", side_effect=complete) as run,
+            ):
+                answer, thread_id, _ = remote_gateway.run_codex(
+                    "demo",
+                    {"working_directory": raw},
+                    store,
+                    {"message_id": "om_1", "content": '{"text":"run"}'},
+                    [],
+                )
+
+        self.assertEqual((answer, thread_id), ("done", "thread-1"))
+        self.assertNotIn("timeout", run.call_args.kwargs)
+
     def test_project_model_settings_are_explicit_parent_command_options(self):
         with patch.object(remote_gateway, "codex_cli_path", return_value=Path("codex.exe")):
             command = remote_gateway.build_codex_command(

@@ -700,7 +700,6 @@ def run_codex(project_key: str, project: dict[str, Any], store: ProjectStore, it
             stderr=subprocess.STDOUT,
             cwd=project["working_directory"],
             creationflags=CREATE_NO_WINDOW,
-            timeout=int(project.get("timeout_seconds") or 3600),
             check=False,
         )
     if result.returncode != 0:
@@ -1752,7 +1751,6 @@ def init_project(args: argparse.Namespace) -> dict[str, Any]:
         "focus": args.focus,
         "bootstrap_source_thread_id": args.bootstrap_source_thread_id or "",
         "registered_epoch": now_epoch(),
-        "timeout_seconds": args.timeout_seconds,
         "agent_permission_mode": args.permission_mode,
     }
     atomic_write_json(CONFIG_PATH, config)
@@ -2313,7 +2311,6 @@ def parser() -> argparse.ArgumentParser:
     initialize.add_argument("--chat-id")
     initialize.add_argument("--focus", required=True)
     initialize.add_argument("--bootstrap-source-thread-id")
-    initialize.add_argument("--timeout-seconds", type=int, default=3600)
     initialize.add_argument(
         "--permission-mode",
         choices=tuple(sorted(PERMISSION_MODES)),

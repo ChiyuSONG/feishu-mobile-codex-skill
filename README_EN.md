@@ -47,14 +47,14 @@ Open the local project you want to connect in Codex, then send:
 
 > Use `$feishu-codex-remote` to connect this project to my Feishu account. Automate everything possible and ask me only when I need to scan a QR code, sign in, or approve access.
 
+> **Before setup:** For the smoothest experience, set local Codex to **Full Access**; otherwise installation and later remote tasks may repeatedly pause for permission approval. For roughly the next 15 minutes, Codex uses CUA (Computer-Use Automation) to configure the browser and Feishu and may temporarily take control of the mouse and keyboard, so avoid using the computer at the same time; take over only when asked to scan, sign in, or approve access. Full Access is highly privileged—use it only on a computer and project you trust. You can later switch to project-only access or per-action review in natural language.
+
 Codex handles the remaining configuration. You normally only need to follow its prompts to:
 
 1. Scan a QR code or sign in to Feishu;
 2. Select the correct Feishu account and approve the permissions needed for messages, images/files, and private documents; ask a tenant administrator to approve them if your tenant requires it;
 3. Copy a Feishu app credential once when necessary;
 4. Confirm a Codex security prompt during the first startup.
-
-The default execution mode is Codex **Full Access**: the local Codex process can access the whole computer and run installed tools without per-command approval. This supports unattended long tasks, but mistakes or malicious instructions have a larger blast radius. Each Feishu group remains bound to one explicit project, and the paid-action, credential, public-exposure, destructive-action, and administrator-elevation gates remain in force. Before or after installation, say “use project-only access” or “use auto review” to lower the mode. This notice is disclosure, not an extra confirmation gate for the default setup.
 
 Codex first sends a real test image to the bound group. The connection is successful only after you can see that image in Feishu; the group then receives the welcome message. If a permission is missing, Codex asks for it at this stage instead of treating a failed upload as completed setup.
 

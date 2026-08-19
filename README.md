@@ -8,7 +8,9 @@
 
 如果你想知道“安卓或华为手机怎么远程使用 Codex”，或者希望用飞书连接本地 Codex、减少对 ChatGPT/Codex 手机端的依赖，这个小工具提供了一条简单路径：不需要把本地项目暴露到公网，也不需要额外搭建管理后台。
 
-![在飞书中向远程 Codex 发送任务、接收文档与巡检状态的界面示意图](assets/feishu-remote-codex-preview.png)
+<p align="center">
+  <img src="assets/feishu-remote-codex-preview.png" alt="在飞书中向远程 Codex 发送任务、接收文档与巡检状态的界面示意图" width="420">
+</p>
 
 ## 它能帮你做什么
 

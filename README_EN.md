@@ -8,7 +8,9 @@ Send tasks to Codex continuously from Feishu without waiting for the previous ta
 
 If you are looking for a practical way to use remote Codex from an Android or Huawei phone, or to connect Feishu to local Codex without depending on the ChatGPT/Codex mobile app, this small tool provides a simple path. It does not require exposing your local project to the public internet or running a separate management dashboard.
 
-![Example of sending a task to remote Codex and receiving a document and inspection status in Feishu](assets/feishu-remote-codex-preview.png)
+<p align="center">
+  <img src="assets/feishu-remote-codex-preview.png" alt="Example of sending a task to remote Codex and receiving a document and inspection status in Feishu" width="420">
+</p>
 
 ## What it can do for you
 

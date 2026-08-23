@@ -26,7 +26,7 @@ These are ready-to-use foundations, not a fixed feature ceiling. After installat
 ## What you need before starting
 
 - A Windows or Mac computer with Codex installed and signed in;
-- A working Feishu account;
+- A working personal Feishu account. **Create the app under your personal account.** Team or company accounts commonly require administrator approval. Do not use one unless you explicitly understand and accept creating the app there;
 - A local project folder you want Codex to work with.
 
 Windows is ready for trial use. macOS support is currently Beta, so pay attention to any system guidance Codex provides during the first setup. Python 3.10 or later is required; if it is missing, Codex explains the requirement and helps you handle it first.
@@ -54,9 +54,10 @@ Open the local project you want to connect in Codex, then send:
 Codex handles the remaining configuration. You normally only need to follow its prompts to:
 
 1. Scan a QR code or sign in to Feishu;
-2. Select the correct Feishu account and approve the permissions needed for messages, images/files, and private documents; ask a tenant administrator to approve them if your tenant requires it;
-3. Copy a Feishu app credential once when necessary;
-4. Confirm a Codex security prompt during the first startup.
+2. Confirm that the Feishu developer console is using your personal account. If Codex/CUA detects a team or company account, it pauses before creating the app and asks you to switch. It continues there only after you explicitly accept the administrator-approval and organizational implications;
+3. Approve the permissions needed for messages, images/files, and private documents;
+4. Copy a Feishu app credential once when necessary;
+5. Confirm a Codex security prompt during the first startup.
 
 Codex first sends a real test image to the bound group. The connection is successful only after you can see that image in Feishu; the group then receives the welcome message. If a permission is missing, Codex asks for it at this stage instead of treating a failed upload as completed setup.
 

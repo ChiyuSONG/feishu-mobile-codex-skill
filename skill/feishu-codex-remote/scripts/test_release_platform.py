@@ -46,6 +46,20 @@ class SetupContractTests(unittest.TestCase):
         self.assertIn("permissions needed for messages, images/files, and private documents", english)
         self.assertIn("real test image", english)
 
+    def test_team_tenant_requires_explicit_informed_opt_in_before_app_creation(self):
+        skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+        setup = (SKILL_ROOT / "references" / "setup.md").read_text(encoding="utf-8")
+        chinese = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        english = (REPO_ROOT / "README_EN.md").read_text(encoding="utf-8")
+
+        account_gate = setup.index("Before CUA clicks any create-app control")
+        app_inventory = setup.index("before creating any app")
+        self.assertLess(account_gate, app_inventory)
+        self.assertIn("Silence and a broad request to automate setup are not consent", setup)
+        self.assertIn("only after explicit informed consent", skill)
+        self.assertIn("务必在个人账号下创建应用", chinese)
+        self.assertIn("Create the app under your personal account", english)
+
 
 class PlatformTests(unittest.TestCase):
     def test_startup_hook_preserves_existing_hooks_and_is_idempotent(self):

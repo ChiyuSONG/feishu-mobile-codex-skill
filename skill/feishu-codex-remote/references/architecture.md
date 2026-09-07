@@ -19,12 +19,12 @@ Use one verified compatible Feishu application across additional groups by defau
 - Claim atomically, retry visibly, and retain terminal failures for diagnosis.
 - Do not impose a gateway wall-clock timeout on the serialized `codex exec` process. Multi-hour work is valid; wait for Codex to exit or report its own terminal failure.
 - Preserve pending work through reloads. Drain current work before graceful restart.
-- Coalesce a short ordinary burst without losing source IDs. Keep forced isolation and conflicting response modes separate.
+- Queue interaction contract: wait for 15 seconds of silence from the same group and sender before claiming an ordinary prefix. Persist immediately; new user messages reset the unstarted wait, duplicates and bots do not. Waiting continues while another batch runs, so a ready backlog has no extra wait, default message-count cap, or adjacent-time cutoff. A first non-whitespace `*` ends the preceding wait, runs alone, and starts a new waiting prefix afterward. Preserve source IDs and conflicting response-mode separation. Do not claim new work while a batch is processing. Pending messages take precedence over separately retried historical failures. Reconstruct waiting from durable receipt timestamps after restart; use platform time only for legacy records without a receipt timestamp.
 
 ## User-Visible State
 
 - Pending: no reaction.
-- Processing: `Typing` reaction.
+- Processing: add `Typing` only for the atomically claimed batch immediately before Codex processing, after preparing attachments; queueing, waiting, and download preparation do not add it.
 - Completed: remove the exact `Typing` reaction and add `CheckMark`.
 - Failed: remove `Typing`, do not add `CheckMark`, and send a visible failure.
 

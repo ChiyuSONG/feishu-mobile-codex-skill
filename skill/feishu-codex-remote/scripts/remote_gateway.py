@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from queue_batching import QUIET_WINDOW_SECONDS, select_pending
+
 import argparse
 from datetime import datetime
 import hashlib
@@ -570,42 +572,26 @@ class ProjectStore:
             if changed:
                 self.save()
 
-    def next_pending(self) -> dict[str, Any] | None:
-        batch = self.next_pending_batch(max_messages=1)
+    def next_pending(self, *, quiet_window_seconds: float = QUIET_WINDOW_SECONDS) -> dict[str, Any] | None:
+        batch = self.next_pending_batch(max_messages=1, quiet_window_seconds=quiet_window_seconds)
         return batch[0] if batch else None
 
     def next_pending_batch(
         self,
         *,
-        max_messages: int = 8,
-        merge_window_seconds: int = 300,
+        max_messages: int | None = None,
+        merge_window_seconds: int | None = None,
+        quiet_window_seconds: float = QUIET_WINDOW_SECONDS,
     ) -> list[dict[str, Any]]:
         with self.lock:
-            candidates = [
-                item
-                for item in self.state.get("messages", {}).values()
-                if item.get("status") in {"pending", "failed"} and int(item.get("attempts") or 0) < 3
-            ]
-            if not candidates:
+            selected, _delay = select_pending(
+                list(self.state.get("messages", {}).values()),
+                forced_single_message, explicit_routing_mode,
+                quiet_seconds=quiet_window_seconds, max_messages=max_messages,
+                merge_window_seconds=merge_window_seconds,
+            )
+            if not selected:
                 return []
-            candidates.sort(key=lambda value: (int(value.get("create_time") or 0), value["message_id"]))
-            selected = [candidates[0]]
-            if not forced_single_message(candidates[0]):
-                previous_time = int(candidates[0].get("create_time") or 0)
-                routing_modes = {explicit_routing_mode(candidates[0])}
-                for candidate in candidates[1:]:
-                    if len(selected) >= max(1, max_messages) or forced_single_message(candidate):
-                        break
-                    candidate_time = int(candidate.get("create_time") or 0)
-                    if candidate_time - previous_time > max(0, merge_window_seconds) * 1000:
-                        break
-                    candidate_mode = explicit_routing_mode(candidate)
-                    next_modes = routing_modes | {candidate_mode}
-                    if "doc" in next_modes and "direct" in next_modes:
-                        break
-                    selected.append(candidate)
-                    routing_modes = next_modes
-                    previous_time = candidate_time
             batch_id = "batch-" + hashlib.sha256(
                 "\0".join(str(item["message_id"]) for item in selected).encode("utf-8")
             ).hexdigest()[:24]
@@ -617,6 +603,14 @@ class ProjectStore:
                 item["batch_id"] = batch_id
             self.save()
             return [dict(item) for item in selected]
+
+    def pending_wait_seconds(self) -> float | None:
+        with self.lock:
+            selected, delay = select_pending(
+                list(self.state.get("messages", {}).values()),
+                forced_single_message, explicit_routing_mode,
+            )
+            return 0.0 if selected else delay
 
     def finish(self, message_id: str, status: str, **fields: Any) -> None:
         with self.lock:
@@ -1653,18 +1647,21 @@ class ProjectWorker:
     def _process_batch(self, items: list[dict[str, Any]]) -> None:
         if not items:
             return
+        with self.store.lock:
+            if any(self.store.state.get("messages", {}).get(str(item["message_id"]), {}).get("status") != "processing" for item in items):
+                raise GatewayError("Only the atomically claimed active batch may start processing")
         message_ids = [str(item["message_id"]) for item in items]
         reply_item = combined_batch_item(items)
         working_reactions: dict[str, str] = {}
-        for item in items:
-            message_id = str(item["message_id"])
-            try:
-                working_reactions[message_id] = self._start_working_reaction(item)
-            except Exception as exc:
-                working_reactions[message_id] = ""
-                append_log(self.log_path, f"ack reaction failed for {message_id}: {exc}")
         try:
             attachments = [path for item in items for path in self._download_attachments(item)]
+            for item in items:
+                message_id = str(item["message_id"])
+                try:
+                    working_reactions[message_id] = self._start_working_reaction(item)
+                except Exception as exc:
+                    working_reactions[message_id] = ""
+                    append_log(self.log_path, f"ack reaction failed for {message_id}: {exc}")
             if len(items) == 1:
                 answer, thread_id, final_path = run_codex(
                     self.key, self.project, self.store, reply_item, attachments
@@ -1736,11 +1733,13 @@ class ProjectWorker:
             self.signal.wait()
             self.signal.clear()
             while True:
-                items = self.store.next_pending_batch(
-                    max_messages=int(self.project.get("merge_max_messages") or 8),
-                    merge_window_seconds=int(self.project.get("merge_window_seconds") or 300),
-                )
+                items = self.store.next_pending_batch()
                 if not items:
+                    delay = self.store.pending_wait_seconds()
+                    if delay is not None:
+                        self.signal.wait(timeout=delay)
+                        self.signal.clear()
+                        continue
                     break
                 self._process_batch(items)
 

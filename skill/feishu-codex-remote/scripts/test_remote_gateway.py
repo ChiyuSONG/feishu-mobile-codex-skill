@@ -1027,7 +1027,7 @@ class RoutingTests(unittest.TestCase):
                     "sender": {"sender_type": "user"},
                 })
                 self.assertEqual(client.events, [])
-                item = worker.store.next_pending()
+                item = worker.store.next_pending(quiet_window_seconds=0)
                 with (
                     patch.object(remote_gateway, "run_codex", return_value=("完成", "thread-1", final_path)),
                     patch.object(remote_gateway, "reply_complete", side_effect=lambda *_args: client.events.append(("reply", "complete")) or ""),
@@ -1074,7 +1074,7 @@ class RoutingTests(unittest.TestCase):
                     "content": '{"text":"test"}',
                     "sender": {"sender_type": "user"},
                 })
-                item = worker.store.next_pending()
+                item = worker.store.next_pending(quiet_window_seconds=0)
                 with patch.object(remote_gateway, "run_codex", side_effect=RuntimeError("boom")):
                     worker._process(item)
                 stored = worker.store.state["messages"]["om_1"]
@@ -1115,7 +1115,7 @@ class RoutingTests(unittest.TestCase):
                         "content": '{"text":"' + text + '"}',
                         "sender": {"sender_type": "user"},
                     })
-                items = worker.store.next_pending_batch()
+                items = worker.store.next_pending_batch(quiet_window_seconds=0)
                 with (
                     patch.object(remote_gateway, "run_codex_batch", return_value=("批次完成", "thread-1", final_path)),
                     patch.object(
@@ -1348,9 +1348,11 @@ class StoreTests(unittest.TestCase):
                         "content": '{"text":"' + text + '"}',
                         "sender": {"sender_type": "user"},
                     })
-                first = store.next_pending_batch()
-                second = store.next_pending_batch()
-                third = store.next_pending_batch()
+                first = store.next_pending_batch(quiet_window_seconds=0)
+                for item in first: store.finish(item["message_id"], "completed")
+                second = store.next_pending_batch(quiet_window_seconds=0)
+                for item in second: store.finish(item["message_id"], "completed")
+                third = store.next_pending_batch(quiet_window_seconds=0)
         self.assertEqual([item["message_id"] for item in first], ["om_1", "om_2"])
         self.assertEqual([item["message_id"] for item in second], ["om_3"])
         self.assertEqual([item["message_id"] for item in third], ["om_4"])
@@ -1368,7 +1370,7 @@ class StoreTests(unittest.TestCase):
                         "content": '{"text":"普通消息"}',
                         "sender": {"sender_type": "user"},
                     })
-                batch = store.next_pending_batch(merge_window_seconds=300)
+                batch = store.next_pending_batch(merge_window_seconds=300, quiet_window_seconds=0)
         self.assertEqual([item["message_id"] for item in batch], ["om_1"])
 
     def test_duplicate_message_is_idempotent(self):

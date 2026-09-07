@@ -98,5 +98,19 @@ class QuietWindowTests(unittest.TestCase):
                 worker._process_batch([item("a")])
             worker.client.add_reaction.assert_not_called()
 
+    def test_exhausted_interrupted_record_is_preserved_without_retry(self):
+        with tempfile.TemporaryDirectory() as raw, patch.object(gateway,"REMOTE_STATE",Path(raw)):
+            store=gateway.ProjectStore("test")
+            store.enqueue(item("old"))
+            store.update_message("old",attempts=3,error="previous process exited")
+            before=dict(store.state["messages"]["old"])
+            with patch.object(qb.time,"time",return_value=1000):
+                self.assertEqual(store.next_pending_batch(),[])
+            store.recover_interrupted()
+            after=store.state["messages"]["old"]
+            self.assertEqual(after["status"],"failed")
+            for key,value in before.items():
+                if key!="status": self.assertEqual(after[key],value)
+
 if __name__=="__main__":
     unittest.main()

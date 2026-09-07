@@ -24,7 +24,8 @@ def select_pending(items, forced_single, routing_mode, *, now=None,
                    merge_window_seconds=None):
     if any(item.get("status") == "processing" for item in items):
         return [], None
-    pending = [item for item in items if item.get("status") == "pending"]
+    pending = [item for item in items if item.get("status") == "pending"
+               and int(item.get("attempts") or 0) < 3]
     pending.sort(key=lambda item: (int(item.get("create_time") or 0), item["message_id"]))
     if not pending:
         failed = [item for item in items if item.get("status") == "failed"

@@ -565,8 +565,10 @@ class ProjectStore:
                         item["status"] = "ignored"
                         item["ignored_at"] = now_iso()
                         changed = True
-                elif item.get("status") == "processing":
-                    item["status"] = "pending"
+                elif item.get("status") == "processing" or (
+                    item.get("status") == "pending" and int(item.get("attempts") or 0) >= 3
+                ):
+                    item["status"] = "failed" if int(item.get("attempts") or 0) >= 3 else "pending"
                     item["recovered_at"] = now_iso()
                     changed = True
             if changed:

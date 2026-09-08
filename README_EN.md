@@ -49,7 +49,7 @@ Open the local project you want to connect in Codex, then send:
 
 > Use `$feishu-codex-remote` to connect this project to my Feishu account. Automate everything possible and ask me only when I need to scan a QR code, sign in, or approve access.
 
-> **Before setup:** For the smoothest experience, choose **GPT-5.6 Sol + High** and set local Codex to **Full Access**; otherwise installation and later remote tasks may repeatedly pause for permission approval. ChatGPT Plus is sufficient to install and use the Skill. If you frequently run long tasks or connect several projects, Pro 5x or a higher allowance offers more headroom; Pro mainly increases Codex usage limits and does not make the same model smarter. For roughly the next 15 minutes, Codex uses CUA (Computer-Use Automation) to configure the browser and Feishu and may temporarily take control of the mouse and keyboard, so avoid using the computer at the same time; take over only when asked to scan, sign in, or approve access. Full Access is highly privileged—use it only on a computer and project you trust. You can later switch to project-only access or per-action review in natural language.
+> **Before setup:** The default remote model is **GPT-6 Astra** (`gpt-6-astra`); existing explicit models, reasoning levels, and Priority/Fast settings are preserved. Set local Codex to **Full Access** to avoid repeated permission pauses during setup and remote tasks. ChatGPT Plus is sufficient to install and use the Skill. If you frequently run long tasks or connect several projects, Pro 5x or a higher allowance offers more headroom; Pro mainly increases Codex usage limits and does not make the same model smarter. For roughly the next 15 minutes, Codex uses CUA (Computer-Use Automation) to configure the browser and Feishu and may temporarily take control of the mouse and keyboard, so avoid using the computer at the same time; take over only when asked to scan, sign in, or approve access. Full Access is highly privileged—use it only on a computer and project you trust. You can later switch to project-only access or per-action review in natural language.
 
 Codex handles the remaining configuration. You normally only need to follow its prompts to:
 
@@ -72,7 +72,7 @@ Send messages just as you normally talk to Codex:
 
 You can continue sending messages while a task is running; new messages wait in the queue. Tasks do not run while the computer or Codex is closed, but messages are not lost. Processing continues after Codex opens again.
 
-Consecutive messages sent while another task is running may be combined into one processing turn, while every request is still preserved. If one message must be handled separately, start it with `*`, for example: `* Handle this message separately; do not combine it with the previous requests.`
+Consecutive queued messages may be combined while preserving every request. Start with `*` to queue one separately, or `#` to process one message in parallel using a copy of the main conversation context. Later ordinary messages still use the main conversation.
 
 ## What automatic inspection does
 

@@ -2,7 +2,7 @@
 
 Use one narrow path:
 
-`Feishu event -> durable idempotent inbox -> serialized Codex CLI run -> direct reply or private document`
+`Feishu event -> durable idempotent inbox -> serialized main turn or one-shot # branch -> direct reply or private document`
 
 Maintain `chat_id -> canonical working_directory -> persistent thread_id`. A group rename never changes this mapping. One project may have multiple intentionally isolated groups, but one group never selects a project from message text.
 
@@ -18,8 +18,10 @@ Use one verified compatible Feishu application across additional groups by defau
 - Queue by Feishu `message_id`; ignore duplicate, bot, and system messages.
 - Claim atomically, retry visibly, and retain terminal failures for diagnosis.
 - Do not impose a gateway wall-clock timeout on the serialized `codex exec` process. Multi-hour work is valid; wait for Codex to exit or report its own terminal failure.
-- Preserve pending work through reloads. Drain current work before graceful restart.
-- Queue interaction contract: wait for 15 seconds of silence from the same group and sender before claiming an ordinary prefix. Persist immediately; new user messages reset the unstarted wait, duplicates and bots do not. Waiting continues while another batch runs, so a ready backlog has no extra wait, default message-count cap, or adjacent-time cutoff. A first non-whitespace `*` ends the preceding wait, runs alone, and starts a new waiting prefix afterward. Preserve source IDs and conflicting response-mode separation. Do not claim new work while a batch is processing. Pending messages take precedence over separately retried historical failures. Reconstruct waiting from durable receipt timestamps after restart; use platform time only for legacy records without a receipt timestamp.
+- Preserve pending work through reloads. Close main and hash admission under the store lock, drain active runs, finish atomic queue writes, and gracefully restart. Reconcile retained arrivals at startup; reopen admission if reload fails.
+- Queue interaction contract: wait for 15 seconds of silence from the same group and sender before claiming an ordinary prefix. Persist immediately; new user messages reset the unstarted wait, duplicates and bots do not. Waiting continues while another batch runs, so a ready backlog has no extra wait, default message-count cap, or adjacent-time cutoff. A first non-whitespace `*` ends the preceding wait, runs alone, and starts a new waiting prefix afterward. Preserve source IDs and conflicting response-mode separation. Do not claim another ordinary main batch or inject messages into an active turn. Hash branches bypass the ordinary quiet window and never join its batch. Pending messages take precedence over separately retried historical failures. Reconstruct waiting from durable receipt timestamps after restart; use platform time only for legacy records without a receipt timestamp.
+
+A first non-whitespace `#` copies the current main context into one persistent child for that message and runs independently alongside main and other hash work. Strip only the leading marker; retain attachments and `/doc` or `/direct` routing. Keep the main thread mapping unchanged. Register before launch to prevent duplicate claims; retries reuse confirmed children. If thread creation may have been submitted but its result is unknown, preserve the exact message for reconciliation instead of creating another child or resuming the parent. Confirmed pre-submission failures retain ordinary retry behavior. The metadata RPC helper has a configurable 30-second deadline, separate from unlimited model-turn duration; branch discovery uses event wakeups and one-second local polling.
 
 ## User-Visible State
 

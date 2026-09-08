@@ -21,7 +21,9 @@ def received_epoch(item):
 
 def select_pending(items, forced_single, routing_mode, *, now=None,
                    quiet_seconds=QUIET_WINDOW_SECONDS, max_messages=None,
-                   merge_window_seconds=None):
+                   merge_window_seconds=None, parallel=None):
+    if parallel is not None:
+        items = [item for item in items if not parallel(item)]
     if any(item.get("status") == "processing" for item in items):
         return [], None
     pending = [item for item in items if item.get("status") == "pending"

@@ -27,6 +27,7 @@ Reuse one verified compatible app for additional groups whenever possible. Creat
 
 - Bind by stable `chat_id -> canonical working_directory -> persistent Codex thread_id`. The Feishu group name is display text only and may be renamed safely.
 - Let the user send consecutive messages without waiting. Follow the queue interaction contract in [architecture.md](references/architecture.md): persist immediately, wait for 15 seconds of silence before claiming ordinary messages, preserve each source ID, and show Typing only when the claimed batch actually starts Codex processing. A first non-whitespace `*` forces that message to be processed alone and is removed before Codex sees the request. Apply the same defaults to existing and new registrations without changing their inspection responsibilities.
+- A first non-whitespace `#` runs one message independently in parallel using a copy of the current main context. Later ordinary messages still use the main thread; preserve attachments and response routing. See [architecture.md](references/architecture.md) for recovery and reload behavior.
 - Treat Feishu edits and recalls as unsupported in the first version. Only a new message creates an instruction: editing or recalling an earlier message does not replace or cancel queued work, and a queued correction cannot live-steer an active Codex turn or undo completed actions.
 - Leave messages in Feishu while the computer is offline. Reconcile them when the Listener reconnects or automatic inspection runs.
 - Let an active Codex turn run until Codex exits or reports its own terminal failure. Do not impose a gateway wall-clock timeout; multi-hour implementation, cloud evaluation, and acceptance work is normal.
@@ -74,6 +75,7 @@ Keep Chinese as the default and protect its existing welcome, inspection, remind
 
 ## Context And Safety
 
+- Use `gpt-6-astra` (GPT-6 Astra) when no project model is configured. Preserve existing explicit models, reasoning levels, and Priority/Fast settings when updating the default.
 - Default every registered project to `full-access`, implemented as `--sandbox danger-full-access` plus `approval_policy="never"`. This prevents routine local tools, installed CLIs, and long-running work from stopping for Codex approvals. Keep `project-only-auto` (`workspace-write` with normal network access) and `auto-review` available as conversational downgrade modes. Full Access is a technical capability, not permission to cross the registered project scope.
 - Do not mirror Desktop chats into Feishu or Feishu chats into Desktop automatically. Use the scoped `desktop-context` or `feishu-context` bridge only when the user explicitly asks to continue or retrieve work from the other surface.
 - Keep credentials and runtime state outside the repository in the OS-specific user data directory. Store secrets in DPAPI or Keychain; never print or commit them.

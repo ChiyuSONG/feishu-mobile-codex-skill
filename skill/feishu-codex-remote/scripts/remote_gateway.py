@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from queue_batching import QUIET_WINDOW_SECONDS, select_pending
+from codex_thread_fork import archive_thread, fork_thread, start_thread
+from gateway_lifecycle import LifecycleStore, LifecycleWorker, MaintenancePaused, MaintenanceStopFailed, run_model_process
 
 import argparse
+from contextlib import ExitStack
 from datetime import datetime
 import hashlib
 import json
@@ -54,6 +57,7 @@ CODEX_HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).expandus
 AUTOMATIONS_ROOT = CODEX_HOME / "automations"
 CODEX_STATE_DB = Path.home() / ".codex" / "state_5.sqlite"
 DEFAULT_PERMISSION_MODE = "full-access"
+DEFAULT_AGENT_MODEL = "gpt-6-astra"
 PROJECT_ONLY_PERMISSION_MODE = "project-only-auto"
 AUTO_REVIEW_PERMISSION_MODE = "auto-review"
 PERMISSION_MODES = {
@@ -61,6 +65,10 @@ PERMISSION_MODES = {
     PROJECT_ONLY_PERMISSION_MODE,
     AUTO_REVIEW_PERMISSION_MODE,
 }
+
+
+def project_agent_model(project: dict[str, Any]) -> str:
+    return str(project.get("agent_model") or "").strip() or DEFAULT_AGENT_MODEL
 
 
 def cli_json_dumps(value: Any) -> str:
@@ -504,12 +512,13 @@ def ignore_message(message: dict[str, Any]) -> bool:
     return sender_type in {"app", "bot", "system"} or message_type == "system"
 
 
-class ProjectStore:
+class ProjectStore(LifecycleStore):
     def __init__(self, project_key: str) -> None:
         self.project_key = project_key
         self.root = project_runtime(project_key)
         self.path = self.root / "state.json"
         self.lock = threading.RLock()
+        self.admission_open = True
         self.state = load_json(
             self.path,
             {
@@ -552,6 +561,8 @@ class ProjectStore:
                 "attempts": 0,
                 "received_at": now_iso(),
             }
+            if self.pause_requested():
+                self._defer(items[message_id])
             self.state["cursor"] = max(int(self.state.get("cursor") or 0), create_time // 1000)
             self.save()
         return True
@@ -565,6 +576,12 @@ class ProjectStore:
                         item["status"] = "ignored"
                         item["ignored_at"] = now_iso()
                         changed = True
+                elif item.get("status") == "processing" and self.pause_requested([item["message_id"]]):
+                    item["maintenance_stop_error"] = "Listener interrupted; stopping has not been confirmed"
+                    changed = True
+                elif item.get("status") in {"pending", "failed"} and self.pause_requested([item["message_id"]]):
+                    self._defer(item)
+                    changed = True
                 elif item.get("status") == "processing" or (
                     item.get("status") == "pending" and int(item.get("attempts") or 0) >= 3
                 ):
@@ -586,11 +603,14 @@ class ProjectStore:
         quiet_window_seconds: float = QUIET_WINDOW_SECONDS,
     ) -> list[dict[str, Any]]:
         with self.lock:
+            if not self.admission_open or self.pause_requested() or self.state.get("main_bootstrap_state") == "outcome_unknown":
+                return []
             selected, _delay = select_pending(
                 list(self.state.get("messages", {}).values()),
                 forced_single_message, explicit_routing_mode,
                 quiet_seconds=quiet_window_seconds, max_messages=max_messages,
                 merge_window_seconds=merge_window_seconds,
+                parallel=parallel_message,
             )
             if not selected:
                 return []
@@ -608,9 +628,12 @@ class ProjectStore:
 
     def pending_wait_seconds(self) -> float | None:
         with self.lock:
+            if not self.admission_open or self.pause_requested() or self.state.get("main_bootstrap_state") == "outcome_unknown":
+                return None
             selected, delay = select_pending(
                 list(self.state.get("messages", {}).values()),
                 forced_single_message, explicit_routing_mode,
+                parallel=parallel_message,
             )
             return 0.0 if selected else delay
 
@@ -666,7 +689,7 @@ def normalize_history_message(message: dict[str, Any]) -> dict[str, Any]:
 def without_forced_marker(item: dict[str, Any]) -> str:
     text = message_text(item.get("content"))
     stripped = text.lstrip()
-    if stripped.startswith("*"):
+    if stripped.startswith(("*", "#")):
         stripped = stripped[1:].lstrip()
     return stripped
 
@@ -684,9 +707,13 @@ def forced_single_message(item: dict[str, Any]) -> bool:
     return message_text(item.get("content")).lstrip().startswith("*")
 
 
+def parallel_message(item: dict[str, Any]) -> bool:
+    return message_text(item.get("content")).lstrip().startswith("#")
+
+
 def explicit_routing_mode(item: dict[str, Any]) -> str:
     text = message_text(item.get("content")).lstrip()
-    if text.startswith("*"):
+    if text.startswith(("*", "#")):
         text = text[1:].lstrip()
     if text.startswith("/doc"):
         return "doc"
@@ -777,7 +804,7 @@ def build_prompt(
 - 工作模式: {workspace_label}
 - working_directory: {project['working_directory']}
 - 工作重点: {project.get('focus') or '按用户当前消息确定'}
-- 远程 Codex 模型: {project.get('agent_model') or '继承用户级 Codex 配置'}
+- 远程 Codex 模型: {project_agent_model(project)}
 - 推理等级: {project.get('agent_reasoning_effort') or '继承用户级 Codex 配置'}
 - 加速档位: {project.get('agent_service_tier') or '继承用户级 Codex 配置'}
 - 执行权限: {permission_mode}
@@ -864,7 +891,7 @@ def build_codex_command(
         )
     else:
         command.append("--approve-for-me")
-    model = str(project.get("agent_model") or "").strip()
+    model = project_agent_model(project)
     reasoning_effort = str(project.get("agent_reasoning_effort") or "").strip()
     service_tier = str(project.get("agent_service_tier") or "").strip()
     if model:
@@ -889,13 +916,13 @@ def build_codex_command(
 
 
 def run_codex(project_key: str, project: dict[str, Any], store: ProjectStore, item: dict[str, Any], attachments: list[Path]) -> tuple[str, str, Path]:
-    run_dir = store.root / "runs" / datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    run_dir = store.root / "runs" / (datetime.now().strftime("%Y%m%d-%H%M%S-%f") + "-" + uuid.uuid4().hex)
     run_dir.mkdir(parents=True, exist_ok=True)
     final_path = run_dir / "final.md"
     event_log = run_dir / "events.jsonl"
     message_ids = [str(value) for value in (item.get("batch_message_ids") or [item.get("message_id")]) if value]
     store.record_run(message_ids, event_log)
-    thread_id = store.thread_id()
+    thread_id = str(item.get("branch_thread_id") or store.thread_id())
     command = build_codex_command(project, final_path, attachments, thread_id)
     prompt = build_prompt(
         project_key,
@@ -904,10 +931,17 @@ def run_codex(project_key: str, project: dict[str, Any], store: ProjectStore, it
         attachments,
         first_turn=not bool(thread_id),
     )
+    if item.get("branch_thread_id"):
+        prompt = (
+            "本轮是井号触发的一次性旁支，只处理本条消息。继承主线快照但不改变主线归属；"
+            "后续普通消息仍回主线。\n\n" + prompt
+        )
     with event_log.open("wb") as output:
-        result = subprocess.run(
+        result = run_model_process(
             command,
             input=prompt.encode("utf-8"),
+            store=store,
+            message_ids=message_ids,
             stdout=output,
             stderr=subprocess.STDOUT,
             cwd=project["working_directory"],
@@ -917,6 +951,8 @@ def run_codex(project_key: str, project: dict[str, Any], store: ProjectStore, it
     if result.returncode != 0:
         raise GatewayError(f"Codex exited with code {result.returncode}; log={event_log}")
     new_thread_id = extract_thread_id(event_log) or thread_id
+    if item.get("branch_thread_id") and new_thread_id != thread_id:
+        raise GatewayError("Codex returned a different branch thread ID")
     if not new_thread_id:
         raise GatewayError(f"Codex returned no persistent thread ID; log={event_log}")
     answer = final_path.read_text(encoding="utf-8").strip()
@@ -1073,6 +1109,7 @@ def welcome_message(project: dict[str, Any]) -> str:
             "**Connected — you can start now**\n\n"
             f"{binding}\n\n"
             "- Send tasks consecutively; queued messages may be combined, or start one with `*` to handle it separately\n"
+            "- Start with `#` for one parallel message with the main context; later ordinary messages stay on the main conversation\n"
             "- If you sent something wrong, send a new correction; editing or recalling is not treated as correction or cancellation\n"
             "- Offline messages stay in Feishu and are processed in order later\n"
             "- Simple results reply directly; complex results can use private Feishu documents\n"
@@ -1096,6 +1133,7 @@ def welcome_message(project: dict[str, Any]) -> str:
         "**已连接，可以直接使用**\n\n"
         f"{binding}\n\n"
         "- 直接连续发送任务；积压消息可能合并处理，必须单独处理时在开头加 `*`\n"
+        "- 开头加 `#`：继承主线上下文，独立并行处理本条；后续普通消息仍回主线\n"
         "- 发错时请另发一条更正；编辑或撤回不会被当作更正或取消指令\n"
         "- 电脑离线时消息留在飞书，上线后按顺序处理\n"
         "- 简单结果直接回复，复杂结果可生成私有飞书文档\n"
@@ -1499,7 +1537,7 @@ def reply_complete(
     return ""
 
 
-class ProjectWorker:
+class ProjectWorker(LifecycleWorker):
     def __init__(self, key: str, project: dict[str, Any], client: FeishuClient, log_path: Path) -> None:
         self.key = key
         self.project = project
@@ -1508,10 +1546,17 @@ class ProjectWorker:
         self.store = ProjectStore(key)
         self.store.recover_interrupted()
         self.signal = threading.Event()
+        self.branch_signal = threading.Event()
+        self.active_branches: dict[str, threading.Thread] = {}
+        self.init_lifecycle()
+        self.branch_thread = threading.Thread(target=self._parallel_loop, name=f"branches-{key}", daemon=True)
         self.thread = threading.Thread(target=self._loop, name=f"worker-{key}", daemon=True)
 
     def start(self) -> None:
+        self.start_lifecycle()
         self.thread.start()
+        self.branch_thread.start()
+        self.branch_signal.set()
         self.signal.set()
 
     def enqueue(self, message: dict[str, Any]) -> bool:
@@ -1519,7 +1564,165 @@ class ProjectWorker:
         if added:
             append_log(self.log_path, f"queued {self.key}:{message.get('message_id')}")
             self.signal.set()
+            self.branch_signal.set()
+            self.lifecycle_signal.set()
         return added
+
+    def _archive_temporary_thread(self, thread_id: str) -> None:
+        archive_thread(thread_id, codex_cli_path(), self.project["working_directory"])
+
+    def _branch_parent(self) -> str:
+        # Called under the shared store lock: first-main initialization and
+        # branch bootstrap must never choose competing persistent roots.
+        parent = self.store.thread_id()
+        if parent:
+            return parent
+        rows = list(self.store.state.get("messages", {}).values())
+        active = [row for row in rows if not parallel_message(row) and row.get("status") == "processing"]
+        if active:
+            event_path = active[0].get("run_event_log")
+            if event_path and Path(event_path).is_file():
+                return extract_thread_id(Path(event_path))
+            return ""
+        previous_runs = sorted(
+            [row for row in rows if not parallel_message(row) and row.get("run_event_log")],
+            key=lambda row: str(row.get("run_started_at") or row.get("processing_started_at") or ""),
+            reverse=True,
+        )
+        if previous_runs:
+            event_path = Path(previous_runs[0]["run_event_log"])
+            recovered = extract_thread_id(event_path) if event_path.is_file() else ""
+            if not recovered:
+                raise GatewayError("Prior main initialization has no confirmed thread; preserve it for reconciliation")
+            self.store.set_thread_id(recovered)
+            return recovered
+        if self.store.state.get("main_bootstrap_state") == "outcome_unknown":
+            return ""
+        if any(not parallel_message(row) and row.get("status") == "completed" for row in rows):
+            raise GatewayError("Missing main thread for existing history; preserve state for reconciliation")
+        codex_path = codex_cli_path()
+        self.store.state["main_bootstrap_state"] = "outcome_unknown"
+        self.store.save()
+        try:
+            parent = start_thread(
+                codex_path, self.project["working_directory"],
+                model=project_agent_model(self.project),
+                reasoning_effort=self.project.get("agent_reasoning_effort") or None,
+            )
+        except Exception as exc:
+            if not getattr(exc, "mutation_submitted", True):
+                self.store.state.pop("main_bootstrap_state", None)
+                self.store.save()
+            raise
+        self.store.set_thread_id(parent)
+        self.store.state["main_bootstrap_state"] = "ready"
+        self.store.save()
+        return parent
+
+    def dispatch_parallel(self) -> list[str]:
+        """Atomically register independent one-message branches before launch."""
+        launched = []
+        with self.store.lock:
+            if not self.store.admission_open or self.store.pause_requested():
+                return launched
+            rows = sorted(
+                self.store.state.get("messages", {}).values(),
+                key=lambda row: (int(row.get("create_time") or 0), row["message_id"]),
+            )
+            for row in rows:
+                message_id = str(row["message_id"])
+                if (not parallel_message(row) or message_id in self.active_branches
+                        or row.get("status") not in {"pending", "failed"}
+                        or int(row.get("attempts") or 0) >= 3
+                        or row.get("branch_state") == "fork_outcome_unknown"):
+                    continue
+                try:
+                    parent = str(row.get("branch_parent_thread_id") or self._branch_parent())
+                except Exception as exc:
+                    row.update(status="failed", attempts=int(row.get("attempts") or 0) + 1, error=str(exc))
+                    self.store.save()
+                    append_log(self.log_path, f"branch parent unavailable {self.key}:{message_id}: {exc}")
+                    self._report_branch_failure(message_id)
+                    continue
+                if not parent:
+                    continue
+                previous = dict(row)
+                row.update(
+                    status="processing", attempts=int(row.get("attempts") or 0) + 1,
+                    processing_started_at=now_iso(), batch_id="branch-" + hashlib.sha256(message_id.encode()).hexdigest()[:24],
+                    branch_parent_thread_id=parent,
+                )
+                self.store.save()
+                thread = threading.Thread(
+                    target=self._run_parallel, args=(dict(row),),
+                    name=f"branch-{self.key}-{message_id}", daemon=True,
+                )
+                self.active_branches[message_id] = thread
+                try:
+                    thread.start()
+                except Exception:
+                    self.active_branches.pop(message_id, None)
+                    row.clear()
+                    row.update(previous)
+                    self.store.save()
+                    raise
+                launched.append(message_id)
+        return launched
+
+    def _run_parallel(self, item: dict[str, Any]) -> None:
+        message_id = str(item["message_id"])
+        try:
+            if self.store.pause_requested([message_id]):
+                self.store.defer_batch([message_id])
+                return
+            child = str(item.get("branch_thread_id") or "")
+            if not child:
+                codex_path = codex_cli_path()
+                # Record ambiguity before the RPC; a crash or timeout must not
+                # blindly fork twice or ever fall back to resuming the parent.
+                self.store.update_message(message_id, branch_state="fork_outcome_unknown")
+                try:
+                    child = fork_thread(
+                        item["branch_parent_thread_id"], codex_path, self.project["working_directory"],
+                    )
+                except Exception as exc:
+                    if not getattr(exc, "mutation_submitted", True):
+                        self.store.update_message(message_id, branch_state="not_submitted")
+                    raise
+                self.store.update_message(message_id, branch_state="ready", branch_thread_id=child)
+            item["branch_thread_id"] = child
+            self._process_batch([item])
+        except Exception as exc:
+            if self.store.pause_requested([message_id]):
+                self.store.defer_batch([message_id])
+                return
+            self.store.finish(message_id, "failed", error=str(exc), failed_at=now_iso())
+            append_log(self.log_path, f"branch failed {self.key}:{message_id}: {traceback.format_exc()}")
+            self._report_branch_failure(message_id)
+        finally:
+            with self.store.lock:
+                self.active_branches.pop(message_id, None)
+            self.signal.set()
+            self.lifecycle_signal.set()
+
+    def _report_branch_failure(self, message_id: str) -> None:
+        try:
+            self.client.reply_post(
+                message_id,
+                "这条旁支暂未完成，原消息和上下文来源已保留，可按确认的状态重试或对账恢复。",
+                "codex-branch-failed-" + hashlib.sha256(message_id.encode()).hexdigest()[:30],
+            )
+        except Exception:
+            append_log(self.log_path, "failed to report branch failure")
+
+    def _parallel_loop(self) -> None:
+        while True:
+            self.branch_signal.wait(timeout=1.0)
+            self.branch_signal.clear()
+            try:
+                self.dispatch_parallel()
+            except Exception:
+                append_log(self.log_path, "branch dispatch failed: " + traceback.format_exc())
 
     def _download_attachments(self, item: dict[str, Any]) -> list[Path]:
         target = self.store.root / "attachments" / item["message_id"]
@@ -1656,6 +1859,8 @@ class ProjectWorker:
         reply_item = combined_batch_item(items)
         working_reactions: dict[str, str] = {}
         try:
+            if self.store.pause_requested(message_ids):
+                raise MaintenancePaused("System upgrade; original request retained")
             attachments = [path for item in items for path in self._download_attachments(item)]
             for item in items:
                 message_id = str(item["message_id"])
@@ -1672,7 +1877,12 @@ class ProjectWorker:
                 answer, thread_id, final_path = run_codex_batch(
                     self.key, self.project, self.store, items, attachments
                 )
-            self.store.set_thread_id(thread_id)
+            if parallel_message(items[0]):
+                self.store.update_message(items[0]["message_id"], branch_thread_id=thread_id)
+            else:
+                self.store.set_thread_id(thread_id)
+            if self.store.pause_requested(message_ids):
+                raise MaintenancePaused("System upgrade; completed output retained")
             document_link = reply_complete(
                 self.client,
                 self.project,
@@ -1703,6 +1913,23 @@ class ProjectWorker:
                 f"completed {self.key}:{','.join(message_ids)}; thread={thread_id}",
             )
         except Exception as exc:
+            if isinstance(exc, MaintenanceStopFailed):
+                for message_id in message_ids:
+                    self.store.update_message(message_id, maintenance_stop_error=str(exc))
+                append_log(self.log_path, f"maintenance stop failed: {','.join(message_ids)}")
+                return
+            if isinstance(exc, MaintenancePaused) or self.store.pause_requested(message_ids):
+                for item in items:
+                    message_id = str(item["message_id"])
+                    self._clear_working_reaction(message_id, working_reactions.get(message_id, ""))
+                    event_path = self.store.state["messages"][message_id].get("run_event_log")
+                    if not parallel_message(item) and event_path:
+                        recovered = extract_thread_id(Path(event_path))
+                        if recovered:
+                            self.store.set_thread_id(recovered)
+                self.store.defer_batch(message_ids)
+                self.lifecycle_signal.set()
+                return
             trace = traceback.format_exc()
             append_log(self.log_path, f"failed {self.key}:{','.join(message_ids)}: {trace}")
             failed_at = now_iso()
@@ -1729,6 +1956,8 @@ class ProjectWorker:
                         )
                     except Exception:
                         append_log(self.log_path, "failed to report terminal failure")
+        finally:
+            self.lifecycle_signal.set()
 
     def _loop(self) -> None:
         while True:
@@ -1814,6 +2043,22 @@ class GatewayService:
                     unknown = [key for key in project_keys if key not in self.workers]
                     if not project_keys or unknown:
                         raise GatewayError(f"Invalid sync request project keys: {project_keys}")
+                    if request.get("maintenance_action"):
+                        if len(project_keys) != 1:
+                            raise GatewayError("Maintenance must target exactly one project")
+                        worker = self.workers[project_keys[0]]
+                        result = worker.maintenance_action(
+                            request["maintenance_action"], request_id,
+                            reason=request.get("reason", ""), release_id=request.get("release_id", ""),
+                            text=request.get("text", ""),
+                        )
+                        if request["maintenance_action"] == "notify-complete":
+                            worker.deliver_lifecycle_notices()
+                        response = {"ok": True, "request_id": request_id, "result": result,
+                                    "acknowledged_at": now_iso()}
+                        atomic_write_json(response_path, response)
+                        request_path.unlink(missing_ok=True)
+                        continue
                     added = self.catch_up(project_keys)
                     for key in project_keys:
                         self.workers[key].signal.set()
@@ -1840,16 +2085,21 @@ class GatewayService:
             worker = self.workers[key]
             with worker.store.lock:
                 items = [dict(item) for item in worker.store.state.get("messages", {}).values()]
+                bootstrap_unknown = worker.store.state.get("main_bootstrap_state") == "outcome_unknown"
             project_counts: dict[str, int] = {}
             for item in items:
                 status_name = str(item.get("status") or "unknown")
                 project_counts[status_name] = project_counts.get(status_name, 0) + 1
                 attempts = int(item.get("attempts") or 0)
-                if status_name in {"pending", "processing"} or (status_name == "failed" and attempts < 3):
+                fork_unknown = item.get("branch_state") == "fork_outcome_unknown" or bootstrap_unknown
+                if status_name == "processing" or (not fork_unknown and (
+                    status_name == "pending" or (status_name == "failed" and attempts < 3)
+                )):
                     active.append({"project_key": key, "message_id": item.get("message_id"), "status": status_name})
-                elif status_name == "failed" and attempts >= 3:
+                elif (status_name == "failed" and attempts >= 3) or (fork_unknown and status_name in {"pending", "failed"}):
                     terminal_failures.append(
-                        {"project_key": key, "message_id": item.get("message_id"), "error": item.get("error")}
+                        {"project_key": key, "message_id": item.get("message_id"),
+                         "error": item.get("error") or "Thread creation outcome unknown; reconciliation required"}
                     )
             counts[key] = project_counts
         return {"active": active, "terminal_failures": terminal_failures, "counts": counts}
@@ -1859,7 +2109,12 @@ class GatewayService:
         quiet_since: float | None = None
         while time.monotonic() < deadline:
             snapshot = self.queue_snapshot(project_keys)
-            if snapshot["active"]:
+            draining = any(
+                entry["status"] == "processing" or self.workers[entry["project_key"]].store.admission_open
+                for entry in snapshot["active"]
+            )
+            branches_running = any(self.workers[key].active_branches for key in project_keys)
+            if draining or branches_running:
                 quiet_since = None
             elif quiet_since is None:
                 quiet_since = time.monotonic()
@@ -1867,6 +2122,13 @@ class GatewayService:
                 return snapshot
             time.sleep(0.25)
         raise GatewayError(f"Timed out waiting for a safe Listener reload: {self.queue_snapshot(project_keys)['active']}")
+
+    def set_admission(self, opened: bool) -> None:
+        for worker in self.workers.values():
+            with worker.store.lock:
+                worker.store.admission_open = opened
+            worker.signal.set()
+            worker.branch_signal.set()
 
     def process_reload_requests(self) -> None:
         RELOAD_REQUESTS.mkdir(parents=True, exist_ok=True)
@@ -1879,6 +2141,10 @@ class GatewayService:
                     request = load_json(request_path, {})
                     timeout = float(request.get("wait_timeout") or 3600)
                     project_keys = list(self.workers)
+                    # Freeze new main/branch claims before waiting for active
+                    # runs. Keep all incoming messages durable for the next
+                    # listener; continuous arrivals cannot starve the reload.
+                    self.set_admission(False)
                     added = self.catch_up(project_keys)
                     for worker in self.workers.values():
                         worker.signal.set()
@@ -1898,12 +2164,19 @@ class GatewayService:
                         "terminal_failures": snapshot["terminal_failures"],
                         "ready_to_restart_at": now_iso(),
                     }
-                    atomic_write_json(response_path, response)
-                    request_path.unlink(missing_ok=True)
-                    append_log(self.log_path, f"graceful reload acknowledged: {request_id}")
-                    time.sleep(0.5)
-                    os._exit(75)
+                    # Finish atomic queue writes before acknowledging and
+                    # exiting. Arrivals after admission closes remain durable
+                    # here or recover through the next startup history pass.
+                    with ExitStack() as locks:
+                        for worker in self.workers.values():
+                            locks.enter_context(worker.store.lock)
+                        atomic_write_json(response_path, response)
+                        request_path.unlink(missing_ok=True)
+                        append_log(self.log_path, f"graceful reload acknowledged: {request_id}")
+                        time.sleep(0.5)
+                        os._exit(75)
                 except Exception as exc:
+                    self.set_admission(True)
                     response = {"ok": False, "request_id": request_id, "error": str(exc)}
                     append_log(self.log_path, f"graceful reload failed: {request_id}: {traceback.format_exc()}")
                     atomic_write_json(response_path, response)
@@ -1988,6 +2261,7 @@ def init_project(args: argparse.Namespace) -> dict[str, Any]:
     path = Path(args.working_directory).resolve()
     if not path.is_dir():
         raise GatewayError(f"Working directory does not exist: {path}")
+    existing_profile = config.get("projects", {}).get(args.project_key, {})
     config.setdefault("projects", {})[args.project_key] = {
         "working_directory": str(path),
         "workspace_mode": args.workspace_mode,
@@ -1999,6 +2273,8 @@ def init_project(args: argparse.Namespace) -> dict[str, Any]:
         "bootstrap_source_thread_id": args.bootstrap_source_thread_id or "",
         "registered_epoch": now_epoch(),
         "agent_permission_mode": args.permission_mode,
+        "agent_model": project_agent_model(existing_profile),
+        **{key: existing_profile[key] for key in ("agent_reasoning_effort", "agent_service_tier") if key in existing_profile},
     }
     atomic_write_json(CONFIG_PATH, config)
     notice = (
@@ -2417,6 +2693,9 @@ def request_sync(args: argparse.Namespace) -> dict[str, Any]:
                 attempts = int(item.get("attempts") or 0)
                 if status_name in {"pending", "processing"} or (status_name == "failed" and attempts < 3):
                     active.append({"project_key": key, "message_id": message_id, "status": status_name})
+                elif status_name == "deferred":
+                    terminal_failures.append({"project_key": key, "message_id": message_id,
+                                              "error": "Deferred for maintenance; not executed"})
                 elif status_name == "failed" and attempts >= 3:
                     terminal_failures.append({"project_key": key, "message_id": message_id, "error": item.get("error")})
             counts[key] = project_counts
@@ -2555,9 +2834,64 @@ def install_hourly_automation(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def request_maintenance(args: argparse.Namespace) -> dict[str, Any]:
+    config = load_config()
+    assert_config(config)
+    keys = selected_project_keys(config, args.project_key, None)
+    if args.action == "status":
+        state = load_json(project_runtime(keys[0]) / "state.json", {})
+        return {"ok": True, "maintenance": state.get("maintenance", {}),
+                "notices": state.get("lifecycle_notices", {}),
+                "unconfirmed_stops": [
+                    {"message_id": mid, "error": row["maintenance_stop_error"]}
+                    for mid, row in state.get("messages", {}).items()
+                    if row.get("status") == "processing" and row.get("maintenance_stop_error")],
+                "recovery_error": state.get("lifecycle_error")}
+    if args.action == "enter" and not (args.reason or "").strip():
+        raise GatewayError("A maintenance reason is required")
+    if args.action == "notify-complete" and not (args.release_id or "").strip():
+        raise GatewayError("A verified release ID is required")
+    text = Path(args.text_file).read_text(encoding="utf-8-sig") if args.text_file else ""
+    request_id = uuid.uuid4().hex
+    request_path = SYNC_REQUESTS / f"{request_id}.json"
+    response_path = SYNC_RESPONSES / f"{request_id}.json"
+    atomic_write_json(request_path, {
+        "request_id": request_id, "project_keys": keys, "requested_at": now_iso(),
+        "maintenance_action": args.action, "reason": args.reason or "",
+        "release_id": args.release_id or "", "text": text,
+    })
+    deadline = time.monotonic() + args.ack_timeout
+    while time.monotonic() < deadline and not response_path.exists():
+        time.sleep(0.25)
+    if not response_path.exists():
+        raise GatewayError(f"Listener has not acknowledged maintenance request {request_id}; request retained")
+    response = load_json(response_path, {})
+    if not response.get("ok"):
+        raise GatewayError(str(response.get("error") or "Maintenance request rejected"))
+    if args.action == "notify-complete":
+        while time.monotonic() < deadline:
+            state = load_json(project_runtime(keys[0]) / "state.json", {})
+            notice = state.get("lifecycle_notices", {}).get("complete:" + args.release_id, {})
+            if notice.get("status") == "delivered":
+                return {"ok": True, "status": "delivered", "request_id": request_id,
+                        "remote_message_id": notice.get("remote_message_id")}
+            if notice.get("error"):
+                raise GatewayError("Completion notice retained for retry: " + str(notice["error"]))
+            time.sleep(0.25)
+        raise GatewayError("Completion notice queued but delivery not yet confirmed")
+    return response
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description="Feishu mobile gateway for persistent Codex project threads")
     commands = result.add_subparsers(dest="command", required=True)
+    maintenance = commands.add_parser("maintenance")
+    maintenance.add_argument("action", choices=("enter", "exit", "status", "notify-complete"))
+    maintenance.add_argument("--project-key", required=True)
+    maintenance.add_argument("--reason")
+    maintenance.add_argument("--release-id")
+    maintenance.add_argument("--text-file")
+    maintenance.add_argument("--ack-timeout", type=float, default=30)
     initialize = commands.add_parser("init-project")
     initialize.add_argument("--project-key", required=True)
     initialize.add_argument("--working-directory", required=True)
@@ -2655,7 +2989,9 @@ def parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
-        if args.command == "init-project":
+        if args.command == "maintenance":
+            value = request_maintenance(args)
+        elif args.command == "init-project":
             value = init_project(args)
         elif args.command == "create-chat":
             value = create_chat(args)

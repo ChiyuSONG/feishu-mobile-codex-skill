@@ -328,7 +328,7 @@ class RoutingTests(unittest.TestCase):
 
             with (
                 patch.object(remote_gateway, "codex_cli_path", return_value=Path("codex.exe")),
-                patch.object(remote_gateway.subprocess, "run", side_effect=complete) as run,
+                patch.object(remote_gateway, "run_model_process", side_effect=complete) as run,
             ):
                 answer, thread_id, _ = remote_gateway.run_codex(
                     "demo",
@@ -598,7 +598,8 @@ class RoutingTests(unittest.TestCase):
         self.assertIn("按需启动 Listener", content)
         self.assertIn("不要另发桌面总结", content)
         self.assertNotIn(r"C:\项目\测试", content)
-        self.assertLess(len(remote_gateway.automation_prompt("demo", r"C:\项目\测试", True)), 300)
+        with patch.object(remote_gateway, "SCRIPT_DIR", Path("C:/gateway")):
+            self.assertLess(len(remote_gateway.automation_prompt("demo", r"C:\项目\测试", True)), 300)
         self.assertIn("-RequestOnly", content)
         self.assertNotIn("-FirstInspectionMessage", content)
         self.assertIn('rrule = "FREQ=HOURLY;INTERVAL=1"', content)

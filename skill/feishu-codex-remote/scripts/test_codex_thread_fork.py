@@ -99,7 +99,7 @@ class ThreadForkTests(unittest.TestCase):
         self.assertEqual(self.invoke(), "child-id")
         requests = self.requests()
         self.assertEqual([item["method"] for item in requests], ["initialize", "initialized", "thread/fork"])
-        self.assertEqual(requests[-1]["params"], {"threadId": "parent-id"})
+        self.assertEqual(requests[-1]["params"], {"threadId": "parent-id", "excludeTurns": True})
         self.assertNotIn("id", requests[1])
         self.assert_cleaned()
 

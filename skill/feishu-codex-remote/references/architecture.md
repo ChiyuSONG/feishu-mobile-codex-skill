@@ -23,6 +23,10 @@ Use one verified compatible Feishu application across additional groups by defau
 
 A first non-whitespace `#` copies the current main context into one persistent child for that message and runs independently alongside main and other hash work. Strip only the leading marker; retain attachments and `/doc` or `/direct` routing. Keep the main thread mapping unchanged. Register before launch to prevent duplicate claims; retries reuse confirmed children. If thread creation may have been submitted but its result is unknown, preserve the exact message for reconciliation instead of creating another child or resuming the parent. Confirmed pre-submission failures retain ordinary retry behavior. The metadata RPC helper has a configurable 30-second deadline, separate from unlimited model-turn duration; branch discovery uses event wakeups and one-second local polling.
 
+For native capacity failure and the narrowly scoped history-fork compatibility
+path, use [runtime-recovery.md](runtime-recovery.md). Its acceptance matrix covers
+terminal notices, concurrent recovery and maintenance alongside the baseline.
+
 ## User-Visible State
 
 - Pending: no reaction.

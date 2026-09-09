@@ -28,6 +28,18 @@ class MaintenanceStopFailed(GatewayError):
 
 
 class LifecycleStore:
+    def fail_provider_capacity(self, message_ids, event_log, text):
+        with self.lock:
+            rows = [self.state["messages"][mid] for mid in message_ids]
+            if any(row.get("status") != "processing" or row.get("run_event_log") != str(event_log)
+                   for row in rows):
+                raise GatewayError("Capacity result does not own the active run")
+            for row in rows:
+                row.update(status="provider_failed", failed_at=timestamp(),
+                           error_kind="provider_capacity", error="Selected model is at capacity")
+                self._queue_lifecycle_notice("capacity:" + row["message_id"], text, row["message_id"])
+            self.save()
+
     def pause_requested(self, message_ids=()):
         with self.lock:
             return bool(self.state.get("maintenance", {}).get("active")) or any(
@@ -247,7 +259,7 @@ class LifecycleWorker:
                               if row.get("branch_thread_id") and row.get("branch_archive_state") != "archived"
                               and row.get("branch_archive_retry_at", 0) <= time.time()
                               and row["message_id"] not in self.active_branches
-                              and (row.get("status") in {"completed", "deferred"}
+                              and (row.get("status") in {"completed", "deferred", "provider_failed"}
                                    or row.get("status") == "failed" and int(row.get("attempts", 0)) >= 3)]
             for row in candidates:
                 child = row["branch_thread_id"]

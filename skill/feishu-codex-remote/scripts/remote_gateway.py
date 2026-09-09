@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from queue_batching import QUIET_WINDOW_SECONDS, select_pending
 from codex_thread_fork import archive_thread, fork_thread, start_thread
+from provider_failure import ProviderCapacityError, terminal_capacity_failure
 from gateway_lifecycle import LifecycleStore, LifecycleWorker, MaintenancePaused, MaintenanceStopFailed, run_model_process
 
 import argparse
@@ -948,11 +949,15 @@ def run_codex(project_key: str, project: dict[str, Any], store: ProjectStore, it
             creationflags=CREATE_NO_WINDOW,
             check=False,
         )
-    if result.returncode != 0:
-        raise GatewayError(f"Codex exited with code {result.returncode}; log={event_log}")
     new_thread_id = extract_thread_id(event_log) or thread_id
     if item.get("branch_thread_id") and new_thread_id != thread_id:
         raise GatewayError("Codex returned a different branch thread ID")
+    if terminal_capacity_failure(event_log):
+        if new_thread_id and not item.get("branch_thread_id"):
+            store.set_thread_id(new_thread_id)
+        raise ProviderCapacityError(event_log)
+    if result.returncode != 0:
+        raise GatewayError(f"Codex exited with code {result.returncode}; log={event_log}")
     if not new_thread_id:
         raise GatewayError(f"Codex returned no persistent thread ID; log={event_log}")
     answer = final_path.read_text(encoding="utf-8").strip()
@@ -1261,6 +1266,7 @@ def send_first_inspection_message(config: dict[str, Any], project_key: str) -> d
 
 def routine_inspection_text(project_key: str, language: str = "zh-CN") -> str:
     counts = inspection_counts(project_key)
+    failures = counts.get("failed", 0) + counts.get("provider_failed", 0)
     progress = active_task_progress_snapshot(project_key, language=language)
     if language == "en":
         if progress:
@@ -1268,13 +1274,13 @@ def routine_inspection_text(project_key: str, language: str = "zh-CN") -> str:
                 f"Status: Listener healthy; task running for {progress['elapsed']}; "
                 f"latest progress: {_one_line_progress_text(progress['detail'])}; "
                 f"pending {counts.get('pending', 0)}, processing {counts.get('processing', 0)}, "
-                f"failed {counts.get('failed', 0)}."
+                f"failed {failures}."
             )
         else:
             status = (
                 "Status: Listener healthy; "
                 f"pending {counts.get('pending', 0)}, processing {counts.get('processing', 0)}, "
-                f"failed {counts.get('failed', 0)}."
+                f"failed {failures}."
             )
         try:
             usage = format_codex_usage(codex_rate_limits(), "en")
@@ -1288,13 +1294,13 @@ def routine_inspection_text(project_key: str, language: str = "zh-CN") -> str:
             f"状态：Listener 正常，任务执行中，已运行 {progress['elapsed']}；"
             f"最近进展：{_one_line_progress_text(progress['detail'])}；"
             f"待处理 {counts.get('pending', 0)}，处理中 {counts.get('processing', 0)}，"
-            f"失败 {counts.get('failed', 0)}。"
+            f"失败 {failures}。"
         )
     else:
         status = (
             "状态：Listener 正常，"
             f"待处理 {counts.get('pending', 0)}，处理中 {counts.get('processing', 0)}，"
-            f"失败 {counts.get('failed', 0)}。"
+            f"失败 {failures}。"
         )
     try:
         usage = format_codex_usage(codex_rate_limits())
@@ -1930,6 +1936,20 @@ class ProjectWorker(LifecycleWorker):
                 self.store.defer_batch(message_ids)
                 self.lifecycle_signal.set()
                 return
+            if isinstance(exc, ProviderCapacityError):
+                text = (
+                    "Codex ended this turn with a model capacity error (at capacity). "
+                    "The request and any saved work are retained. Please try again later; "
+                    "the gateway will not rerun it or change models automatically."
+                    if self.project.get("language") == "en" else
+                    "Codex 本轮最终仍返回模型容量不足（at capacity）。原消息和已保存的工作都保留；"
+                    "网关不会额外重复执行或切换模型，稍后可以重试。"
+                )
+                self.store.fail_provider_capacity(message_ids, exc.event_log, text)
+                for message_id in message_ids:
+                    self._clear_working_reaction(message_id, working_reactions.get(message_id, ""))
+                self.lifecycle_signal.set()
+                return
             trace = traceback.format_exc()
             append_log(self.log_path, f"failed {self.key}:{','.join(message_ids)}: {trace}")
             failed_at = now_iso()
@@ -2096,7 +2116,7 @@ class GatewayService:
                     status_name == "pending" or (status_name == "failed" and attempts < 3)
                 )):
                     active.append({"project_key": key, "message_id": item.get("message_id"), "status": status_name})
-                elif (status_name == "failed" and attempts >= 3) or (fork_unknown and status_name in {"pending", "failed"}):
+                elif status_name == "provider_failed" or (status_name == "failed" and attempts >= 3) or (fork_unknown and status_name in {"pending", "failed"}):
                     terminal_failures.append(
                         {"project_key": key, "message_id": item.get("message_id"),
                          "error": item.get("error") or "Thread creation outcome unknown; reconciliation required"}
@@ -2696,7 +2716,7 @@ def request_sync(args: argparse.Namespace) -> dict[str, Any]:
                 elif status_name == "deferred":
                     terminal_failures.append({"project_key": key, "message_id": message_id,
                                               "error": "Deferred for maintenance; not executed"})
-                elif status_name == "failed" and attempts >= 3:
+                elif status_name == "provider_failed" or (status_name == "failed" and attempts >= 3):
                     terminal_failures.append({"project_key": key, "message_id": message_id, "error": item.get("error")})
             counts[key] = project_counts
         if not active:

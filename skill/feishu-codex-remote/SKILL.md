@@ -93,4 +93,6 @@ Always preview the exact project binding, Automation, Hook, launcher, Skill dire
 
 Read [architecture.md](references/architecture.md) for queue, routing, reaction, reload, and acceptance invariants. Read [setup.md](references/setup.md) for installation or repair. Read [release-state.md](references/release-state.md) only when assessing unfinished release work; never present a planned item as implemented.
 
+For repairs or cross-edition fix ports, read [runtime-recovery.md](references/runtime-recovery.md) for native capacity handling, history-fork compatibility and executable acceptance scenarios.
+
 After structural edits, run the Skill validator and the complete unit test suite. Do not modify or reload an installed live gateway while editing the package source.

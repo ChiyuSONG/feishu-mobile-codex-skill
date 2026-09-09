@@ -11,10 +11,14 @@ import json
 import math
 import os
 import queue
+import re
+import sqlite3
 import subprocess
 import threading
 import time
 from typing import Any
+
+from history_fork_snapshot import codex_home, snapshot_rollout
 
 
 DEFAULT_TIMEOUT_SECONDS = 30.0
@@ -29,9 +33,10 @@ class ThreadForkError(RuntimeError):
 
 
 class ThreadForkRPCError(ThreadForkError):
-    def __init__(self, method: str, code: int | None):
+    def __init__(self, method: str, code: int | None, *, projection_ordinals: tuple[int, int] | None = None):
         self.method = method
         self.code = code
+        self.projection_ordinals = projection_ordinals
         super().__init__(f"Codex {method} RPC error (code={code})")
 
 
@@ -101,8 +106,15 @@ def _response(messages: queue.Queue, request_id: int, method: str, deadline: flo
             code = error.get("code") if isinstance(error, dict) else None
             if type(code) is not int:
                 code = None
-            # Server message/data may contain private input or credentials.
-            raise ThreadForkRPCError(method, code)
+            # Preserve only this pre-creation fault signature, never server text.
+            text = error.get("message", "") if isinstance(error, dict) else ""
+            mismatch = re.fullmatch(
+                r"failed to prepare paginated fork: thread history projection for "
+                r"[0-9a-f-]{36} expected ordinal (\d+), got (\d+)",
+                text if isinstance(text, str) else "",
+            )
+            raise ThreadForkRPCError(method, code,
+                                     projection_ordinals=tuple(map(int, mismatch.groups())) if mismatch else None)
         result = message.get("result")
         if not isinstance(result, dict):
             raise ThreadForkProtocolError(f"Codex {method}: missing result object")
@@ -154,10 +166,31 @@ def fork_thread(
     """
     if not isinstance(parent_thread_id, str) or not parent_thread_id.strip():
         raise ValueError("parent_thread_id must be a nonempty string")
-    return _thread_rpc(
-        "thread/fork", {"threadId": parent_thread_id}, codex_path, cwd,
-        timeout_seconds, parent_thread_id=parent_thread_id,
-    )
+    try:
+        return _thread_rpc(
+            "thread/fork", {"threadId": parent_thread_id, "excludeTurns": True}, codex_path, cwd,
+            timeout_seconds, parent_thread_id=parent_thread_id,
+        )
+    except ThreadForkRPCError as exc:
+        if exc.method != "thread/fork" or exc.code != -32603 or not exc.projection_ordinals:
+            raise
+        # Only a known pre-creation rejection permits another request. EOF,
+        # timeout and unknown errors must never produce an untracked second fork.
+        try:
+            snapshot = snapshot_rollout(parent_thread_id, codex_home() / "feishu-fork-snapshots")
+        except (OSError, ValueError, sqlite3.Error):
+            raise exc from None
+        child_id = _thread_rpc(
+            "thread/fork", {"threadId": parent_thread_id, "path": str(snapshot), "excludeTurns": True},
+            codex_path, cwd, timeout_seconds, parent_thread_id=parent_thread_id,
+        )
+        # Retain an ambiguous import for reconciliation; successful forks own
+        # their persisted rollout. Each concurrent RPC owns a unique snapshot.
+        try:
+            snapshot.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return child_id
 
 
 def start_thread(
@@ -251,7 +284,7 @@ def _thread_rpc(
         _send(process, {
             "id": 0,
             "method": "initialize",
-            "params": {"clientInfo": {
+            "params": {"capabilities": {"experimentalApi": bool(params.get("path"))}, "clientInfo": {
                 "name": "feishu_thread_fork", "title": "Feishu Thread Fork", "version": "1.0.0",
             }},
         }, "initialize")

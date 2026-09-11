@@ -1105,10 +1105,16 @@ def publish_document(project: dict[str, Any], source: Path, artifacts: list[Path
     }
 
 
+def project_inspection_report_mode(project: dict[str, Any]) -> str:
+    # Missing fields belong to existing registrations: preserve their behavior.
+    return str(project.get("inspection_report_mode", "full"))
+
+
 def welcome_message(project: dict[str, Any]) -> str:
     working_directory = str(project["working_directory"])
     workspace_mode = project_workspace_mode(project)
     hourly_enabled = project_hourly_catch_up_enabled(project)
+    status_only = project_inspection_report_mode(project) == "status"
     if project_language(project) == "en":
         binding = (
             "This group is bound to an isolated General workspace and cannot access other projects. "
@@ -1133,8 +1139,9 @@ def welcome_message(project: dict[str, Any]) -> str:
             "- Want different behavior or a new feature? Tell Codex directly; each group can be customized separately\n"
             "- Say “remind me every hour starting tomorrow at 10” or “done, cancel the reminder”\n\n"
             f"{inspection}\n"
-            "Later inspections use three lines for message status, Token plan usage, and a customization tip. "
-            "Ask in natural language to change the content or cadence, pause it, or resume it."
+            + ("Inspections report only this project's status, including elapsed time and recent progress while a task is running. "
+               if status_only else "Later inspections use three lines for message status, Token plan usage, and a customization tip. ")
+            + "Use chat instructions to change the content or cadence, pause it, or resume it."
         )
     binding = (
         "本群已绑定一个独立的 General 工作区，不会访问其他项目。群名可以随时修改，不影响连接。"
@@ -1157,8 +1164,9 @@ def welcome_message(project: dict[str, Any]) -> str:
         "- 想调整现有行为或增加功能，直接告诉 Codex；不同群可以分别定制\n"
         "- 直接说“从明天 10 点开始每小时提醒我……”或“已完成，取消提醒”\n\n"
         f"{inspection}\n"
-        "后续默认用三句报告消息状态、Token plan 用量和定制提示；"
-        "直接告诉我修改巡检内容或频率、暂停或恢复即可。"
+        + ("巡检默认只报告本项目状态；任务运行时包含已运行时间和最近进展。"
+           if status_only else "后续默认用三句报告消息状态、Token plan 用量和定制提示；")
+        + "通过对话指令修改巡检内容或频率、暂停或恢复即可。"
     )
 
 
@@ -1217,7 +1225,7 @@ def first_inspection_text(project_key: str, language: str = "zh-CN") -> str:
             "It runs hourly by default while the computer and Codex are available, starts or checks the Listener, "
             "recovers missed messages, and continues queued work.\n\n"
             f"Current status: {current}\n"
-            "Later unchanged runs use only three lines: message status, Token usage, and a natural-language customization tip. "
+            "Later unchanged runs use only three lines: message status, Token usage, and a chat-instruction customization tip. "
             "Ask to pause, resume, change the inspection, or add a reminder.\n\n"
             "Each inspection starts a lightweight Codex run and consumes the corresponding Codex usage."
         )
@@ -1237,7 +1245,7 @@ def first_inspection_text(project_key: str, language: str = "zh-CN") -> str:
         "默认每小时运行一次。在电脑和 Codex 可用时，它会检查并按需启动 Listener、"
         "补拉遗漏消息并继续处理积压。\n\n"
         f"本次状态：{current}\n"
-        "后续默认每次只发送三句：消息状态、Token 用量和自然语言定制提示。"
+        "后续默认每次只发送三句：消息状态、Token 用量和对话指令定制提示。"
         "你可以直接要求暂停、恢复或调整巡检，也可以按你的描述设置备忘提醒。\n\n"
         "自动巡检会发起一次轻量 Codex 运行并消耗相应的 Codex 使用额度。"
     )
@@ -1247,6 +1255,8 @@ def send_first_inspection_message(config: dict[str, Any], project_key: str) -> d
     project = config["projects"].get(project_key)
     if not isinstance(project, dict) or not project.get("chat_id"):
         raise GatewayError(f"Remote project has no Feishu chat binding: {project_key}")
+    if project_inspection_report_mode(project) == "status":
+        return {"ok": True, "skipped": True, "reason": "status-only"}
     marker = project_runtime(project_key) / "inspection.json"
     recorded = load_json(marker, {})
     if recorded.get("first_message_sent"):
@@ -1276,7 +1286,7 @@ def send_first_inspection_message(config: dict[str, Any], project_key: str) -> d
     return {"ok": True, "skipped": False, "message_id": message_id, "text": text}
 
 
-def routine_inspection_text(project_key: str, language: str = "zh-CN") -> str:
+def routine_inspection_text(project_key: str, language: str = "zh-CN", report_mode: str = "full") -> str:
     counts = inspection_counts(project_key)
     failures = counts.get("failed", 0) + counts.get("provider_failed", 0)
     progress = active_task_progress_snapshot(project_key, language=language)
@@ -1294,12 +1304,14 @@ def routine_inspection_text(project_key: str, language: str = "zh-CN") -> str:
                 f"pending {counts.get('pending', 0)}, processing {counts.get('processing', 0)}, "
                 f"failed {failures}."
             )
+        if report_mode == "status":
+            return status
         try:
             usage = format_codex_usage(codex_rate_limits(), "en")
         except Exception:
             usage = "Codex usage: temporarily unavailable"
         usage = usage.rstrip(".") + "."
-        tip = "Tip: use natural language to change this inspection, add reminders, or create other custom behavior."
+        tip = "Tip: use chat instructions to change this inspection, add reminders, or create other custom behavior."
         return "\n".join((status, usage, tip))
     if progress:
         status = (
@@ -1314,12 +1326,14 @@ def routine_inspection_text(project_key: str, language: str = "zh-CN") -> str:
             f"待处理 {counts.get('pending', 0)}，处理中 {counts.get('processing', 0)}，"
             f"失败 {failures}。"
         )
+    if report_mode == "status":
+        return status
     try:
         usage = format_codex_usage(codex_rate_limits())
     except Exception:
         usage = "Codex 用量：暂时无法读取"
     usage = usage.rstrip("。") + "。"
-    tip = "提示：可以直接用自然语言修改巡检内容、设置提醒或增加其他用法。"
+    tip = "提示：可以通过对话指令修改巡检、设置提醒或增加其他用法。"
     return "\n".join((status, usage, tip))
 
 
@@ -1338,7 +1352,7 @@ def send_routine_inspection_message(config: dict[str, Any], project_key: str) ->
     tenant = client.tenant_info()
     if str(tenant.get("tenant_key") or "") != str(config["expected_tenant_key"]):
         raise GatewayError("Refusing to send inspection status in an unexpected tenant")
-    text = routine_inspection_text(project_key, project_language(project))
+    text = routine_inspection_text(project_key, project_language(project), project_inspection_report_mode(project))
     payload = client.send_post(
         str(project["chat_id"]),
         text,
@@ -2329,7 +2343,14 @@ def init_project(args: argparse.Namespace) -> dict[str, Any]:
     if not path.is_dir():
         raise GatewayError(f"Working directory does not exist: {path}")
     existing_profile = config.get("projects", {}).get(args.project_key, {})
+    report_mode = (
+        project_inspection_report_mode(existing_profile)
+        if args.project_key in config.get("projects", {})
+        else ("status" if config.get("projects") else "full")
+    )
     config.setdefault("projects", {})[args.project_key] = {
+        **existing_profile,
+        "inspection_report_mode": report_mode,
         "working_directory": str(path),
         "workspace_mode": args.workspace_mode,
         "language": args.language,
@@ -2822,7 +2843,7 @@ def request_reload(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def automation_prompt(project_key: str, working_directory: str, report_usage: bool = True) -> str:
-    report_text = "并向项目飞书群发送默认三句巡检报告，其中运行中任务的当前进度写在第一句。" if report_usage else "如有任务正在执行，会向项目飞书群报告当前进度。"
+    report_text = "并按项目配置发送巡检报告：状态包含运行中任务的进度，仅完整模式附加用量和提示。" if report_usage else "如有任务正在执行，会向项目飞书群报告当前进度。"
     if platform.system() == "Windows":
         script = SCRIPT_DIR / "sync_feishu.ps1"
         report_flag = " -InspectionReport" if report_usage else " -FirstInspectionMessage"
@@ -3010,7 +3031,7 @@ def parser() -> argparse.ArgumentParser:
     sync.add_argument(
         "--inspection-report",
         action="store_true",
-        help="Send the one-time formal explanation or the default three-line recurring report",
+        help="Send the project's configured inspection report (full or status-only)",
     )
     reload_command = commands.add_parser("reload")
     reload_command.add_argument("--ack-timeout", type=float, default=30)
@@ -3029,7 +3050,7 @@ def parser() -> argparse.ArgumentParser:
         "--report-usage",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Include the default three-line Feishu report; use --no-report-usage after an explicit user change",
+        help="Include the project's configured Feishu report; use --no-report-usage after an explicit user change",
     )
     automation_state = automation.add_mutually_exclusive_group()
     automation_state.add_argument(

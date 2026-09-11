@@ -14,7 +14,7 @@ Use this document to distinguish implemented behavior from release targets. A ta
 - Users do not need to understand internal project keys or thread IDs. A Feishu group is bound by its stable `chat_id` to an exact local working directory and persistent Codex thread; renaming the group must not affect the binding. The local folder name may be used only as an initial display name.
 - Reuse one verified compatible Feishu application across additional groups. Before any app creation, inventory known user-level registries, Listener configurations, protected credential metadata, and the approved tenant's self-built apps; create another app only after recording exact incompatibility evidence or receiving an explicit isolation request. Default to and recommend a personal tenant for first-time setup; use a team tenant only when the requested destination is explicitly inside it and the user accepts its administrator and organizational implications. Do not consolidate working legacy apps as a side effect of new-project setup.
 - Enable an hourly scheduled inspection by default. Describe it to users as `自动巡检`, not as a heartbeat: when the computer and Codex are available, it starts or checks the Listener, reconciles missed messages, and asks the Listener to process backlog. Let the user change its interval, pause it, resume it, or disable it in natural language.
-- Send a formal explanation on the first inspection. On later unchanged runs, default to exactly three short lines: message/Listener state, Token plan usage, and a natural-language customization reminder. Let a user's later conversational change override this default.
+- Follow [Automatic Inspection](../SKILL.md#automatic-inspection): the first registered project uses full reports, additional new projects use status-only reports, and existing customizations remain unchanged. Do not duplicate shared reminders or DIY behavior.
 - Start the demand-only Listener from a trusted user-level Codex `SessionStart` Hook on `startup|resume`. Do not describe it as OS login startup. Keep the hourly inspection for reports, reminders, and reconciliation rather than making it the only Listener starter.
 - Support Chinese and English. Keep Chinese as the default system-message language and preserve its existing quality; ordinary Codex replies follow the current user's message or explicit language request.
 - Require Python 3.10 or newer. This is an implementation compatibility baseline, not a user preference to ask during onboarding.
@@ -46,7 +46,7 @@ Keep the first Feishu message close to this form. Show the local folder name, no
 > - 发错时请另发更正；编辑或撤回不会被当作更正或取消指令
 > - 想调整现有行为或增加功能，直接告诉 Codex；不同群可以分别定制
 > - 直接说“从明天 10 点开始每小时提醒我……”或“已完成，取消提醒”
-> **自动巡检默认每小时运行一次**：首次会正式说明；此后默认用三句报告状态、Token 用量和自然语言定制提示。任务正在执行时，状态句还会显示已运行时间和最近一条安全进展。你也可以直接要求调整内容或频率、暂停或恢复自动巡检。
+> **自动巡检默认每小时运行一次**：首个项目首次会正式说明，此后默认报告状态、Token 用量和对话指令提示；后续新项目从首次巡检起只报告各自状态。任务正在执行时，状态句还会显示已运行时间和最近一条安全进展。你也可以直接要求调整内容或频率、暂停或恢复自动巡检。
 
 Do not describe the group name as the binding key. Do not show commands, configuration variables, app IDs, chat IDs, or internal thread concepts unless the user is diagnosing a problem.
 
@@ -71,7 +71,7 @@ Generalize the proven reminder interaction without importing project-specific he
 | One-prompt installer | Skill workflow and runtime bootstrap implemented; real clean-machine/CUA onboarding not yet accepted |
 | QR/login-based Feishu authorization | Browser OAuth with a localhost callback is implemented and can use Feishu's QR login when offered; real clean-account testing remains |
 | CUA/browser-assisted Feishu console setup | Procedure defined; real console navigation not yet accepted |
-| Hourly automatic inspection and default three-line Token/status report | Implemented with a one-time formal explanation, hourly idempotent recurring report, and non-blocking active-task progress in the status line |
+| Hourly automatic inspection with per-project report modes | Implemented: full reports for the first registration, status-only for additional new projects, preserved legacy/custom settings, hourly deduplication, and non-blocking active-task progress; live acceptance remains |
 | Listener start on Codex session startup/resume | Implemented as a merge-safe user-level SessionStart Hook; real Desktop trust/startup test pending |
 | Chinese and English | Chinese remains the default; English welcome, inspection, reminder, usage and document-link text are implemented; real bilingual Feishu test pending |
 | Deterministic natural-language changes to inspection schedule | Not implemented; do not promise a specific sub-hour cadence until Codex Automation support is verified |

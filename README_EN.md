@@ -2,13 +2,11 @@
 
 [中文](README.md)
 
-A DIY-friendly mobile entrance to your local Codex. Start installation with one prompt and, when the environment is ready, aim to complete the first connection in about 15 minutes.
+Use Feishu on your phone to send tasks to local Codex, follow progress, and receive results. It is for people who want remote Codex access from an Android, Huawei, or other phone without exposing local projects to the public internet or running a separate management dashboard.
 
-Send tasks to Codex continuously from Feishu without waiting for the previous task to finish. The computer and Codex must remain running for tasks to execute and return results. When either is closed, Feishu can still receive new messages and keep them pending; Codex processes them in order after it opens again. Remote outputs such as screenshots, Excel workbooks, and PDFs can also be viewed or downloaded through Feishu.
+While the computer and Codex are running, tasks execute locally. When either is closed, Feishu still receives new messages and keeps them pending; Codex processes them in order when it opens again. Screenshots, Excel workbooks, PDFs, and other results can also be viewed or downloaded through Feishu.
 
-If you are looking for a practical way to use remote Codex from an Android or Huawei phone, or to connect Feishu to local Codex without depending on the ChatGPT/Codex mobile app, this small tool provides a simple path. It does not require exposing your local project to the public internet or running a separate management dashboard.
-
-It automates setup wherever practical, but it is not a fully managed service. Differences in Feishu accounts, permission approval, and computer environments may require you to scan, confirm, or follow Codex through a few setup issues. After that one-time setup, you can keep adapting it in natural language to fit your own workflow.
+This is a DIY-friendly local tool, not a managed service. When the environment is ready, installation starts with one prompt and aims to complete the first connection in about 15 minutes. The first setup may still require a QR scan, permission approval, or a few guided environment fixes.
 
 <p align="center">
   <img src="assets/feishu-remote-codex-preview.png" alt="Example of sending a task to remote Codex and receiving a document and inspection status in Feishu" width="420">
@@ -16,20 +14,26 @@ It automates setup wherever practical, but it is not a fully managed service. Di
 
 ## What it can do for you
 
-- Review code, edit files, run tests, or organize information remotely from your phone;
+- Use your phone to ask Codex to review code, edit files, run tests, or organize information;
 - Send several ideas and requirements continuously and let Codex process them in order;
-- Leave tasks in Feishu while away from the computer instead of recording them in another app;
-- Receive short results directly; screenshots appear as native Feishu images, explicitly delivered PDFs and Excel workbooks arrive as chat attachments, and long tutorials or complex layouts use private Feishu documents;
+- Hand tasks to Codex through Feishu while away from the computer instead of saving them in a notes app for later;
+- Receive short results in the group, screenshots as Feishu images, PDFs and Excel workbooks as attachments, and long or structured results as private Feishu documents;
 - Keep one Feishu group connected to one local project, even if the group is renamed;
-- Check message status and Codex usage, or create follow-up reminders in natural language.
+- Check message status and Codex usage, or create follow-up reminders through chat instructions.
 
-These are ready-to-use foundations, not a fixed feature ceiling. After installation, simply talk to Codex to adjust existing behavior, add features that fit your workflow, or give different Feishu groups their own reply style, inspection content, and working conventions. For example, you could customize it to collect and post a daily industry-news digest, let colleagues submit work questions by mentioning the bot after agreeing on the team tenant, group membership, and local permission boundary, or give each project group its own response format and scheduled work. These are opt-in DIY extensions, not default features, and Codex implements them within the relevant project, permission, and security boundaries.
+These are the default capabilities, not a fixed feature ceiling. After installation, you can use chat instructions to:
+
+- Give different Feishu groups their own reply styles, inspection content, and project conventions;
+- Add project automations such as industry-news digests;
+- Let colleagues submit work by mentioning the bot after defining the team account, group membership, and local permission boundary.
+
+These extensions are not enabled by default. Codex confirms the relevant boundaries before adding team access, broader permissions, or external services.
 
 ## What you need before starting
 
 - A Windows or Mac computer with Codex installed and signed in;
-- A working Feishu account. For a first setup, a **personal Feishu account is the default and recommended choice** because it has the lowest organizational risk and usually avoids team-admin involvement. Use a team account only when your explicit goal is to connect a group under that company account and you accept the organizational visibility and administrator-approval implications;
-- A local project folder you want Codex to work with.
+- A working Feishu account. For a first setup, a **personal Feishu account is the default and recommended choice** and usually avoids team-admin involvement. Use a team account only when you explicitly need a company group and accept the organizational visibility and administrator-approval implications;
+- A local Project already created in Codex that you want to manage remotely through Feishu.
 
 Windows is ready for trial use. macOS support is currently Beta, so pay attention to any system guidance Codex provides during the first setup. Python 3.10 or later is required; if it is missing, Codex explains the requirement and helps you handle it first.
 
@@ -41,19 +45,33 @@ Send this repository URL to Codex and say:
 
 > Install the `skill/feishu-codex-remote` Skill from this repository.
 
-If the repository is private, first make sure the computer running Codex is signed in and has permission to access it on GitHub.
-
 Alternatively, copy [`skill/feishu-codex-remote`](skill/feishu-codex-remote) into the Codex Skills directory, then restart or refresh Codex. Do not copy the entire repository as one Skill.
 
 ### Step 2: Connect Feishu with one prompt
 
-Open the local project you want to connect in Codex, then send:
+In Codex, find the project you want to manage remotely through Feishu, open a conversation within it, and send:
 
 > Use `$feishu-codex-remote` to connect this project to my Feishu account. Automate everything possible and ask me only when I need to scan a QR code, sign in, or approve access.
 
-> **Before setup:** The default remote model is **GPT-6 Astra** (`gpt-6-astra`); existing explicit models, reasoning levels, and Priority/Fast settings are preserved. Set local Codex to **Full Access** to avoid repeated permission pauses during setup and remote tasks. ChatGPT Plus is sufficient to install and use the Skill. If you frequently run long tasks or connect several projects, Pro 5x or a higher allowance offers more headroom; Pro mainly increases Codex usage limits and does not make the same model smarter. For roughly the next 15 minutes, Codex uses CUA (Computer-Use Automation) to configure the browser and Feishu and may temporarily take control of the mouse and keyboard, so avoid using the computer at the same time; take over only when asked to scan, sign in, or approve access. Full Access is highly privileged—use it only on a computer and project you trust. You can later switch to project-only access or per-action review in natural language.
+**During setup: local Codex settings**
 
-Codex handles the remaining configuration. You normally only need to follow its prompts to:
+- We recommend **GPT-6 Astra** for installation and connection. Choose reasoning effort and Priority/Fast as needed; neither has a required setting.
+- **Full Access is strongly recommended for both setup and remote use** and enabled by default for new remote connections to reduce approval interruptions. It permits reading and writing local files and running commands; mistakes or malicious instructions may affect data outside the project. Use it only on a computer and project you trust. You can lower permissions through chat instructions, but some operations may then require returning to the computer, limiting the remote experience.
+
+**After connection: defaults for Feishu tasks**
+
+- New projects default to **GPT-6 Astra** (`gpt-6-astra`) and **Full Access**. Reasoning effort and Priority/Fast inherit your local Codex configuration; existing explicit model, reasoning, and speed settings are preserved.
+- Use chat instructions to adjust each project's model, reasoning effort, speed, and permissions for its task difficulty and usage budget. These need not match your installation settings.
+
+**Plan recommendation**
+
+**Plus is sufficient**. For frequent long tasks or multiple projects, we recommend **Pro 20×** for more usage headroom. See [OpenAI's current plan details](https://learn.chatgpt.com/docs/pricing).
+
+Codex handles the remaining configuration.
+
+**Avoid using the computer during configuration**: Codex uses CUA (Computer-Use Automation) to configure the browser and Feishu and may temporarily take control of the mouse and keyboard. Take over when prompted to scan a QR code, sign in, or approve access.
+
+You normally only need to follow its prompts to:
 
 1. Scan a QR code or sign in to Feishu;
 2. Confirm that the Feishu developer console is using your personal account, the default choice for a first setup. If Codex/CUA detects a team or company account, it pauses before creating the app and asks you to switch. It continues only when your request explicitly targets a group under that account and you confirm the administrator-approval and organizational-visibility implications;
@@ -78,13 +96,18 @@ Consecutive queued messages may be combined while preserving every request. Star
 
 ## What automatic inspection does
 
-While the computer and Codex are running, automatic inspection runs once per hour by default. It confirms that the connection is healthy, finds missed or pending messages, and reports Codex usage. Inspection does not run while the computer or Codex is closed.
+Each newly connected project gets an hourly automatic inspection by default unless you opt out during setup. It checks the connection and retrieves missed or pending messages. Inspection does not run while the computer or Codex is closed. When Codex opens again, the background connection starts and checks for messages without waiting for the next inspection.
 
-The first inspection explains its purpose. Later, unless you change it, the report briefly tells you:
+For projects sharing one Feishu bot on the same computer, project status is reported separately while shared information stays in one conversation:
 
-1. Whether any messages are pending, processing, or failed;
+- **First project**: the first inspection explains its purpose; subsequent reports contain the three lines below.
+- **Additional new projects**: only the first status line is sent, starting with their first inspection. Usage and tips are not repeated.
+
+1. Whether any messages are pending, processing, or failed; active tasks also show elapsed time and the latest safe progress update;
 2. How much of the Codex 5-hour and 7-day allowances remains;
-3. That you can change inspection in natural language.
+3. That you can change inspection, set reminders, or add other uses through chat instructions.
+
+Existing inspection customizations are preserved. Reminders and other DIY features stay in the conversation you specify and are not copied into new projects.
 
 For example, say:
 
@@ -95,11 +118,11 @@ For example, say:
 
 Each inspection starts a lightweight Codex run and consumes a small amount of the corresponding allowance. Pause it when you do not need it.
 
-Inspection can also become a small tool of your own. For example, say:
+No reminder is created by default. When needed, inspection can become a small tool of your own. For example, say:
 
 > Starting at 10 AM tomorrow, remind me during every inspection to submit the document until I say it is complete.
 
-Codex remembers the item and keeps reminding you during inspections after that time. When it is done, simply say `The document has been submitted. Stop the reminder.` You can describe other inspection uses in natural language without following fixed commands.
+Codex remembers the item and keeps reminding you during inspections after that time. When it is done, simply say `The document has been submitted. Stop the reminder.` You can describe other inspection uses through chat instructions without following a fixed format.
 
 These reminders depend on the computer, Codex, and automatic inspection; they are not exact-time alarms. Use Feishu Calendar or a phone alarm for anything that must happen at an exact time.
 
@@ -137,6 +160,7 @@ A recovery backup is kept by default. To also delete local credentials, cache, a
 
 ## Privacy and security
 
+- Default Full Access grants local execution capabilities, not permission to work across projects; you can switch to project-only access or per-action review through chat instructions;
 - Your local project does not need to be exposed to the public internet;
 - Feishu credentials are stored outside the repository;
 - Public link sharing is disabled and verified for generated Feishu documents;

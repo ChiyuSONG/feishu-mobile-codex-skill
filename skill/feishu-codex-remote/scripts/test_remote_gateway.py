@@ -586,7 +586,7 @@ class RoutingTests(unittest.TestCase):
         self.assertIn("飞书每小时查漏", content)
         self.assertIn("sync_feishu.ps1", content)
         self.assertIn("-InspectionReport", content)
-        self.assertIn("默认三句巡检报告", content)
+        self.assertIn("按项目配置发送巡检报告", content)
         self.assertIn("按需启动 Listener", content)
         self.assertIn("不要另发桌面总结", content)
         self.assertNotIn(r"C:\项目\测试", content)
@@ -599,7 +599,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(result["status"], "ACTIVE")
         self.assertNotIn("?", content)
 
-    def test_hourly_automation_defaults_to_three_line_report(self):
+    def test_hourly_automation_defaults_to_configured_report(self):
         args = remote_gateway.parser().parse_args(
             [
                 "install-hourly-automation",

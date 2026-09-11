@@ -68,17 +68,18 @@ class SetupContractTests(unittest.TestCase):
         self.assertIn("Silence and a broad request to automate setup are not consent", setup)
         self.assertIn("user gives informed consent for that specific tenant", skill)
         self.assertIn("默认并推荐个人版飞书", chinese)
-        self.assertIn("明确目标就是接入某个公司飞书账号下的工作群", chinese)
+        self.assertIn("只有明确要接入公司工作群", chinese)
+        self.assertIn("确认接受管理员审批和组织可见性", chinese)
         self.assertIn("personal Feishu account is the default and recommended choice", english)
-        self.assertIn("explicit goal is to connect a group under that company account", english)
+        self.assertIn("only when your request explicitly targets a group under that account", english)
 
     def test_readmes_set_diy_expectations_without_presenting_examples_as_defaults(self):
         chinese = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
         english = (REPO_ROOT / "README_EN.md").read_text(encoding="utf-8")
-        self.assertIn("不是完全托管式服务", chinese)
-        self.assertIn("这些属于按需 DIY 的扩展，不是默认开启的功能", chinese)
-        self.assertIn("not a fully managed service", english)
-        self.assertIn("opt-in DIY extensions, not default features", english)
+        self.assertIn("不是托管式服务", chinese)
+        self.assertIn("这些扩展不会默认开启", chinese)
+        self.assertIn("not a managed service", english)
+        self.assertIn("These extensions are not enabled by default", english)
 
 
 class PlatformTests(unittest.TestCase):
@@ -353,7 +354,7 @@ class FirstInspectionTests(unittest.TestCase):
         self.assertIn("待处理 1，处理中 1，失败 1", lines[0])
         self.assertNotIn("events.jsonl", lines[0])
         self.assertIn("Codex 用量：5小时额度剩余 80%", lines[1])
-        self.assertIn("自然语言修改巡检内容", lines[2])
+        self.assertIn("通过对话指令修改巡检", lines[2])
 
     def test_routine_inspection_uuid_is_idempotent_per_hour(self):
         first = datetime(2026, 8, 12, 10, 5, tzinfo=timezone.utc)
@@ -409,7 +410,7 @@ class FirstInspectionTests(unittest.TestCase):
         self.assertEqual(len(lines), 3)
         self.assertEqual(lines[0], "Status: Listener healthy; pending 0, processing 0, failed 0.")
         self.assertIn("Codex usage: 5 hours: 75% remaining", lines[1])
-        self.assertIn("use natural language", lines[2])
+        self.assertIn("use chat instructions", lines[2])
 
     def test_usage_failure_is_a_three_line_non_blocking_fallback(self):
         with tempfile.TemporaryDirectory() as raw:

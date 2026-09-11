@@ -29,7 +29,7 @@ These are ready-to-use foundations, not a fixed feature ceiling. After installat
 - Let colleagues submit work questions by mentioning the bot after agreeing on the team tenant, group membership, and local permission boundary;
 - Give each project group its own response format, inspection content, working conventions, and scheduled work.
 
-These are opt-in DIY extensions, not default features, and Codex implements them within the relevant project, permission, and security boundaries.
+These are opt-in DIY extensions, not default features, and Codex implements and verifies them within the relevant project, permission, and security boundaries.
 
 ## What you need before starting
 
@@ -43,9 +43,9 @@ Windows is ready for trial use. macOS support is currently Beta, so pay attentio
 
 ### Step 1: Give the Skill to Codex
 
-Send this repository URL to Codex and say:
+Copy this instruction and send it to Codex:
 
-> Install the `skill/feishu-codex-remote` Skill from this repository.
+> Install the `skill/feishu-codex-remote` Skill from https://github.com/ChiyuSONG/feishu-codex-remote.
 
 Alternatively, copy [`skill/feishu-codex-remote`](skill/feishu-codex-remote) into the Codex Skills directory, then restart or refresh Codex. Do not copy the entire repository as one Skill.
 
@@ -57,13 +57,14 @@ In Codex, find the project you want to manage remotely through Feishu, open a co
 
 **During setup: local Codex settings**
 
-- We recommend **GPT-6 Astra** for installation and connection. Choose reasoning effort and Priority/Fast as needed; neither has a required setting.
-- **Full Access is strongly recommended for both setup and remote use** and enabled by default for new remote connections to reduce approval interruptions. It permits reading and writing local files and running commands; mistakes or malicious instructions may affect data outside the project. Use it only on a computer and project you trust. You can lower permissions through chat instructions, but some operations may then require returning to the computer, limiting the remote experience.
+We recommend **GPT-6 Astra** and **strongly recommend enabling Full Access** to reduce approval interruptions during installation. Choose reasoning effort and Fast mode as needed; neither has a required setting.
 
 **After connection: defaults for Feishu tasks**
 
-- New projects default to **GPT-6 Astra** (`gpt-6-astra`) and **Full Access**. Reasoning effort and Priority/Fast inherit your local Codex configuration; existing explicit model, reasoning, and speed settings are preserved.
-- Use chat instructions to adjust each project's model, reasoning effort, speed, and permissions for its task difficulty and usage budget. These need not match your installation settings.
+- New projects default to **GPT-6 Astra** (`gpt-6-astra`) and **Full Access**. Reasoning effort and Fast mode inherit your local Codex configuration; existing explicit model, reasoning, and speed settings are preserved.
+- Adjust each project separately through chat instructions to suit its task difficulty and usage budget. These settings need not match your installation settings.
+
+> **Full Access warning — applies to both installation and remote use: it permits reading and writing local files and running commands; mistakes or malicious instructions may affect data outside the project. Use it only on a computer and project you trust. You can switch to project-only access or per-action review through chat instructions, but some operations may then require returning to the computer. Full Access remains strongly recommended for smooth remote work.**
 
 **Plan recommendation**
 
@@ -94,13 +95,13 @@ Send messages just as you normally talk to Codex:
 
 You can continue sending messages while a task is running; new messages wait in the queue. Tasks do not run while the computer or Codex is closed, but messages are not lost. Processing continues after Codex opens again.
 
-Consecutive queued messages may be combined while preserving every request. Start with `*` to queue one separately, or `#` to process one message in parallel using a copy of the main conversation context. Later ordinary messages still use the main conversation.
+Consecutive messages sent while the previous task is running may be combined into one turn while preserving every request. Start with `*` to queue one separately, or `#` to process one message in parallel using a copy of the main conversation context. Later ordinary messages still use the main conversation.
 
 ## What automatic inspection does
 
 Each newly connected project gets an hourly automatic inspection by default unless you opt out during setup. It checks the connection and retrieves missed or pending messages. Inspection does not run while the computer or Codex is closed. When Codex opens again, the background connection starts and checks for messages without waiting for the next inspection.
 
-For projects sharing one Feishu bot on the same computer, project status is reported separately while shared information stays in one conversation:
+For projects sharing one Feishu bot on the same computer, **project status is reported separately while shared information stays in one conversation**:
 
 - **First project**: the first inspection explains its purpose; subsequent reports contain the three lines below.
 - **Additional new projects**: only the first status line is sent, starting with their first inspection. Usage and tips are not repeated.

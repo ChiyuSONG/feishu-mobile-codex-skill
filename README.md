@@ -43,9 +43,9 @@ Windows 可直接试用。macOS 版本目前为 Beta，建议首次安装时留�
 
 ### 第一步：把 Skill 交给 Codex
 
-把本仓库地址发给 Codex，并说：
+复制下面这句话发给 Codex：
 
-> 安装这个仓库中的 `skill/feishu-codex-remote` Skill。
+> 安装 https://github.com/ChiyuSONG/feishu-codex-remote 仓库中的 `skill/feishu-codex-remote` Skill。
 
 也可以手动将 [`skill/feishu-codex-remote`](skill/feishu-codex-remote) 复制到 Codex Skills 目录，然后重启或刷新 Codex。不要把整个仓库复制成一个 Skill。
 
@@ -57,13 +57,14 @@ Windows 可直接试用。macOS 版本目前为 Beta，建议首次安装时留�
 
 **安装时：本地 Codex 怎么设置**
 
-- 建议使用 **GPT-6 Astra** 完成安装和连接；推理等级和 Priority/Fast 按需选择，不作硬性要求。
-- **安装和远程使用均强烈建议开启 Full Access**，新建远程连接默认启用，减少任务因权限审批而暂停。它允许读写本机文件、执行命令，误操作或恶意指令可能影响项目外的数据，请只在可信电脑和项目中使用。可通过对话指令降低权限，但部分操作可能需要回到电脑处理，影响远程使用体验。
+建议使用 **GPT-6 Astra**，并**强烈建议开启 Full Access**，减少安装过程中的权限询问。推理等级和快速模式（Fast mode）按需选择，不作硬性要求。
 
 **连接后：飞书任务默认用什么配置**
 
-- 新项目默认使用 **GPT-6 Astra**（`gpt-6-astra`）和 **Full Access**；推理等级、Priority/Fast 沿用本机 Codex 配置，已有项目的显式模型和推理、加速设置不变。
-- 可以通过对话指令为每个项目分别调整模型、推理等级、加速和权限，按任务难度与额度需求选择，不必和安装时相同。
+- 新项目默认使用 **GPT-6 Astra**（`gpt-6-astra`）和 **Full Access**；推理等级、快速模式沿用本机 Codex 配置。已有项目的显式模型、推理和加速设置保留。
+- 各项目可通过对话指令单独调整，按任务难度和额度需求选择，不必与安装时相同。
+
+> **Full Access 风险提示——安装和远程使用均适用：它允许读写本机文件、执行命令，误操作或恶意指令可能影响项目外的数据。请只在可信电脑和项目中使用。可通过对话指令改为“仅项目权限”或“逐次审批”，但部分操作可能需要回到电脑处理；为保持远程任务顺畅，仍强烈建议使用 Full Access。**
 
 **套餐建议**
 

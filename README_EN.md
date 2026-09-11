@@ -2,11 +2,13 @@
 
 [中文](README.md)
 
-Use Feishu on your phone to send tasks to local Codex, follow progress, and receive results. It is for people who want remote Codex access from an Android, Huawei, or other phone without exposing local projects to the public internet or running a separate management dashboard.
+A DIY-friendly mobile entrance to your local Codex. Start installation with one prompt and, when the environment is ready, aim to complete the first connection in about 15 minutes.
 
-While the computer and Codex are running, tasks execute locally. When either is closed, Feishu still receives new messages and keeps them pending; Codex processes them in order when it opens again. Screenshots, Excel workbooks, PDFs, and other results can also be viewed or downloaded through Feishu.
+If you are looking for a practical way to use remote Codex from an Android or Huawei phone, or to connect Feishu to local Codex without depending on the ChatGPT/Codex mobile app, this small tool provides a simple path. It does not require exposing your local project to the public internet or running a separate management dashboard.
 
-This is a DIY-friendly local tool, not a managed service. When the environment is ready, installation starts with one prompt and aims to complete the first connection in about 15 minutes. The first setup may still require a QR scan, permission approval, or a few guided environment fixes.
+Send tasks to Codex continuously from Feishu without waiting for the previous task to finish. The computer and Codex must remain running for tasks to execute and return results. When either is closed, Feishu can still receive new messages and keep them pending; Codex processes them in order after it opens again. Remote outputs such as screenshots, Excel workbooks, and PDFs can also be viewed or downloaded through Feishu.
+
+It automates setup wherever practical, but it is not a fully managed service. Differences in Feishu accounts, permission approval, and computer environments may require you to scan, confirm, or follow Codex through a few setup issues. After that one-time setup, you can keep adapting it through chat instructions to fit your own workflow.
 
 <p align="center">
   <img src="assets/feishu-remote-codex-preview.png" alt="Example of sending a task to remote Codex and receiving a document and inspection status in Feishu" width="420">
@@ -14,25 +16,25 @@ This is a DIY-friendly local tool, not a managed service. When the environment i
 
 ## What it can do for you
 
-- Use your phone to ask Codex to review code, edit files, run tests, or organize information;
+- Review code, edit files, run tests, or organize information remotely from your phone;
 - Send several ideas and requirements continuously and let Codex process them in order;
 - Hand tasks to Codex through Feishu while away from the computer instead of saving them in a notes app for later;
-- Receive short results in the group, screenshots as Feishu images, PDFs and Excel workbooks as attachments, and long or structured results as private Feishu documents;
+- Receive short results directly; screenshots appear as native Feishu images, explicitly delivered PDFs and Excel workbooks arrive as chat attachments, and long tutorials or complex layouts use private Feishu documents;
 - Keep one Feishu group connected to one local project, even if the group is renamed;
 - Check message status and Codex usage, or create follow-up reminders through chat instructions.
 
-These are the default capabilities, not a fixed feature ceiling. After installation, you can use chat instructions to:
+These are ready-to-use foundations, not a fixed feature ceiling. After installation, simply talk to Codex to adjust existing behavior or add features that fit your workflow. For example:
 
-- Give different Feishu groups their own reply styles, inspection content, and project conventions;
-- Add project automations such as industry-news digests;
-- Let colleagues submit work by mentioning the bot after defining the team account, group membership, and local permission boundary.
+- Collect and post a daily industry-news digest;
+- Let colleagues submit work questions by mentioning the bot after agreeing on the team tenant, group membership, and local permission boundary;
+- Give each project group its own response format, inspection content, working conventions, and scheduled work.
 
-These extensions are not enabled by default. Codex confirms the relevant boundaries before adding team access, broader permissions, or external services.
+These are opt-in DIY extensions, not default features, and Codex implements them within the relevant project, permission, and security boundaries.
 
 ## What you need before starting
 
 - A Windows or Mac computer with Codex installed and signed in;
-- A working Feishu account. For a first setup, a **personal Feishu account is the default and recommended choice** and usually avoids team-admin involvement. Use a team account only when you explicitly need a company group and accept the organizational visibility and administrator-approval implications;
+- A working Feishu account. For a first setup, a **personal Feishu account is the default and recommended choice** because it has the lowest organizational risk and usually avoids team-admin involvement. Use a team account only when your explicit goal is to connect a group under that company account and you accept the organizational visibility and administrator-approval implications;
 - A local Project already created in Codex that you want to manage remotely through Feishu.
 
 Windows is ready for trial use. macOS support is currently Beta, so pay attention to any system guidance Codex provides during the first setup. Python 3.10 or later is required; if it is missing, Codex explains the requirement and helps you handle it first.

@@ -68,7 +68,7 @@ class SetupContractTests(unittest.TestCase):
         self.assertIn("Silence and a broad request to automate setup are not consent", setup)
         self.assertIn("user gives informed consent for that specific tenant", skill)
         self.assertIn("默认并推荐个人版飞书", chinese)
-        self.assertIn("只有明确要接入公司工作群", chinese)
+        self.assertIn("明确目标就是接入某个公司飞书账号下的工作群", chinese)
         self.assertIn("确认接受管理员审批和组织可见性", chinese)
         self.assertIn("personal Feishu account is the default and recommended choice", english)
         self.assertIn("only when your request explicitly targets a group under that account", english)
@@ -76,10 +76,13 @@ class SetupContractTests(unittest.TestCase):
     def test_readmes_set_diy_expectations_without_presenting_examples_as_defaults(self):
         chinese = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
         english = (REPO_ROOT / "README_EN.md").read_text(encoding="utf-8")
-        self.assertIn("不是托管式服务", chinese)
-        self.assertIn("这些扩展不会默认开启", chinese)
-        self.assertIn("not a managed service", english)
-        self.assertIn("These extensions are not enabled by default", english)
+        self.assertIn("不是完全托管式服务", chinese)
+        self.assertIn("这些属于按需 DIY 的扩展，不是默认开启的功能", chinese)
+        self.assertIn("not a fully managed service", english)
+        self.assertIn("opt-in DIY extensions, not default features", english)
+        self.assertTrue(chinese.split("\n\n")[2].startswith("一个可 DIY 的本地 Codex 手机入口"))
+        self.assertTrue(english.split("\n\n")[2].startswith("A DIY-friendly mobile entrance"))
+        self.assertLess(chinese.index("如果你想知道"), chinese.index("你可以在飞书里连续"))
 
 
 class PlatformTests(unittest.TestCase):

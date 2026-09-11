@@ -1,4 +1,4 @@
 interface:
   display_name: "飞书远程 Codex"
-  short_description: "一句话连接本地项目与私有飞书，支持离线队列和自动巡检"
+  short_description: "可 DIY 的飞书远程 Codex，支持离线队列和自动巡检"
   default_prompt: "使用 $feishu-codex-remote，把当前项目连接到我的飞书。尽可能自动完成，只在需要扫码、登录或授权时提醒我。"

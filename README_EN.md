@@ -2,11 +2,13 @@
 
 [中文](README.md)
 
-Turn Feishu into a mobile entrance to your local Codex. Start installation with one prompt and, when the environment is ready, aim to complete the first connection in about 15 minutes.
+A DIY-friendly mobile entrance to your local Codex. Start installation with one prompt and, when the environment is ready, aim to complete the first connection in about 15 minutes.
 
 Send tasks to Codex continuously from Feishu without waiting for the previous task to finish. The computer and Codex must remain running for tasks to execute and return results. When either is closed, Feishu can still receive new messages and keep them pending; Codex processes them in order after it opens again. Remote outputs such as screenshots, Excel workbooks, and PDFs can also be viewed or downloaded through Feishu.
 
 If you are looking for a practical way to use remote Codex from an Android or Huawei phone, or to connect Feishu to local Codex without depending on the ChatGPT/Codex mobile app, this small tool provides a simple path. It does not require exposing your local project to the public internet or running a separate management dashboard.
+
+It automates setup wherever practical, but it is not a fully managed service. Differences in Feishu accounts, permission approval, and computer environments may require you to scan, confirm, or follow Codex through a few setup issues. After that one-time setup, you can keep adapting it in natural language to fit your own workflow.
 
 <p align="center">
   <img src="assets/feishu-remote-codex-preview.png" alt="Example of sending a task to remote Codex and receiving a document and inspection status in Feishu" width="420">
@@ -21,12 +23,12 @@ If you are looking for a practical way to use remote Codex from an Android or Hu
 - Keep one Feishu group connected to one local project, even if the group is renamed;
 - Check message status and Codex usage, or create follow-up reminders in natural language.
 
-These are ready-to-use foundations, not a fixed feature ceiling. After installation, simply talk to Codex to adjust existing behavior, add features that fit your workflow, or give different Feishu groups their own reply style, inspection content, and working conventions. Codex makes and verifies those changes within the relevant project, permission, and security boundaries, without requiring you to learn configuration files or commands first.
+These are ready-to-use foundations, not a fixed feature ceiling. After installation, simply talk to Codex to adjust existing behavior, add features that fit your workflow, or give different Feishu groups their own reply style, inspection content, and working conventions. For example, you could customize it to collect and post a daily industry-news digest, let colleagues submit work questions by mentioning the bot after agreeing on the team tenant, group membership, and local permission boundary, or give each project group its own response format and scheduled work. These are opt-in DIY extensions, not default features, and Codex implements them within the relevant project, permission, and security boundaries.
 
 ## What you need before starting
 
 - A Windows or Mac computer with Codex installed and signed in;
-- A working personal Feishu account. **Create the app under your personal account.** Team or company accounts commonly require administrator approval. Do not use one unless you explicitly understand and accept creating the app there;
+- A working Feishu account. For a first setup, a **personal Feishu account is the default and recommended choice** because it has the lowest organizational risk and usually avoids team-admin involvement. Use a team account only when your explicit goal is to connect a group under that company account and you accept the organizational visibility and administrator-approval implications;
 - A local project folder you want Codex to work with.
 
 Windows is ready for trial use. macOS support is currently Beta, so pay attention to any system guidance Codex provides during the first setup. Python 3.10 or later is required; if it is missing, Codex explains the requirement and helps you handle it first.
@@ -54,7 +56,7 @@ Open the local project you want to connect in Codex, then send:
 Codex handles the remaining configuration. You normally only need to follow its prompts to:
 
 1. Scan a QR code or sign in to Feishu;
-2. Confirm that the Feishu developer console is using your personal account. If Codex/CUA detects a team or company account, it pauses before creating the app and asks you to switch. It continues there only after you explicitly accept the administrator-approval and organizational implications;
+2. Confirm that the Feishu developer console is using your personal account, the default choice for a first setup. If Codex/CUA detects a team or company account, it pauses before creating the app and asks you to switch. It continues only when your request explicitly targets a group under that account and you confirm the administrator-approval and organizational-visibility implications;
 3. Approve the permissions needed for messages, images/files, and private documents;
 4. Copy a Feishu app credential once when necessary;
 5. Confirm a Codex security prompt during the first startup.

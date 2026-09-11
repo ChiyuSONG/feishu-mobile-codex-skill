@@ -772,6 +772,18 @@ def hourly_catch_up_project_keys(workers: dict[str, Any]) -> list[str]:
     return [key for key, worker in workers.items() if project_hourly_catch_up_enabled(worker.project)]
 
 
+def scheduled_catch_up_project_keys(workers: dict[str, Any], *, reconnected: bool) -> list[str]:
+    return list(workers) if reconnected else hourly_catch_up_project_keys(workers)
+
+
+def attach_reconnect_reconciliation(client: Any, signal: threading.Event) -> bool:
+    """Wake the non-blocking reconciliation worker after an SDK reconnect."""
+    if not hasattr(client, "on_reconnected"):
+        return False
+    client.on_reconnected = signal.set
+    return True
+
+
 def build_prompt(
     project_key: str,
     project: dict[str, Any],
@@ -2008,6 +2020,7 @@ class GatewayService:
             raise GatewayError(f"Wrong Feishu tenant: expected {expected_tenant}, got {actual_tenant}")
         self.client._verified_tenant_key = actual_tenant
         self.log_path = REMOTE_STATE / "logs" / "gateway.log"
+        self.reconcile_lock = threading.Lock()
         self.workers: dict[str, ProjectWorker] = {}
         self.chat_to_key: dict[str, str] = {}
         for key, project in config["projects"].items():
@@ -2036,18 +2049,39 @@ class GatewayService:
             return False
         return self.workers[key].enqueue(message)
 
-    def catch_up(self, project_keys: list[str] | None = None) -> dict[str, int]:
+    def catch_up(
+        self,
+        project_keys: list[str] | None = None,
+        *,
+        continue_on_error: bool = False,
+        log_when_empty: bool = True,
+    ) -> dict[str, int]:
         result: dict[str, int] = {}
-        for key, worker in self.workers.items():
-            if project_keys is not None and key not in project_keys:
-                continue
-            cursor = int(worker.store.state.get("cursor") or worker.project.get("registered_epoch") or now_epoch())
-            messages = self.client.list_messages(worker.project["chat_id"], max(0, cursor - 2))
-            added = 0
-            for message in messages:
-                added += int(worker.enqueue(normalize_history_message(message)))
-            result[key] = added
-        append_log(self.log_path, f"catch-up complete: {result}")
+        errors: dict[str, str] = {}
+        # Manual sync, reconnect, periodic repair and graceful reload can race.
+        # Serialize only the bounded Feishu history calls; never hold this lock
+        # while Codex processes a task.
+        with self.reconcile_lock:
+            for key, worker in self.workers.items():
+                if project_keys is not None and key not in project_keys:
+                    continue
+                try:
+                    cursor = int(
+                        worker.store.state.get("cursor")
+                        or worker.project.get("registered_epoch")
+                        or now_epoch()
+                    )
+                    messages = self.client.list_messages(worker.project["chat_id"], max(0, cursor - 2))
+                    added = 0
+                    for message in messages:
+                        added += int(worker.enqueue(normalize_history_message(message)))
+                    result[key] = added
+                except Exception as exc:
+                    if not continue_on_error:
+                        raise
+                    errors[key] = f"{type(exc).__name__}: {exc}"
+        if log_when_empty or any(result.values()) or errors:
+            append_log(self.log_path, f"catch-up complete: {result}; errors={errors}")
         return result
 
     def process_sync_requests(self) -> None:
@@ -2214,16 +2248,26 @@ class GatewayService:
         self.start_workers()
         self.catch_up()
 
+        reconnect_signal = threading.Event()
+
         def hourly() -> None:
             interval = int(self.config.get("catch_up_seconds") or 3600)
             while True:
-                time.sleep(interval)
+                reconnected = reconnect_signal.wait(timeout=interval)
+                reconnect_signal.clear()
                 try:
-                    project_keys = hourly_catch_up_project_keys(self.workers)
+                    project_keys = scheduled_catch_up_project_keys(
+                        self.workers,
+                        reconnected=reconnected,
+                    )
                     if project_keys:
-                        self.catch_up(project_keys)
+                        self.catch_up(
+                            project_keys,
+                            continue_on_error=reconnected,
+                            log_when_empty=True,
+                        )
                 except Exception:
-                    append_log(self.log_path, "hourly catch-up failed:\n" + traceback.format_exc())
+                    append_log(self.log_path, "hourly/reconnect catch-up failed:\n" + traceback.format_exc())
 
         threading.Thread(target=hourly, name="hourly-catch-up", daemon=True).start()
         threading.Thread(target=self.process_sync_requests, name="manual-sync", daemon=True).start()
@@ -2257,13 +2301,16 @@ class GatewayService:
         )
         app_id, secret = load_app_credentials(self.config)
         append_log(self.log_path, f"listener starting; projects={list(self.workers)}")
-        WsClient(
+        ws_client = WsClient(
             app_id,
             secret,
             log_level=lark.LogLevel.WARNING,
             event_handler=dispatcher,
             auto_reconnect=True,
-        ).start()
+        )
+        if not attach_reconnect_reconciliation(ws_client, reconnect_signal):
+            append_log(self.log_path, "SDK has no reconnect callback; startup/hourly reconciliation remains active")
+        ws_client.start()
 
 
 def init_project(args: argparse.Namespace) -> dict[str, Any]:

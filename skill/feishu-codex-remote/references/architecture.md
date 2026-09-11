@@ -11,9 +11,9 @@ Use one verified compatible Feishu application across additional groups by defau
 ## Reliability
 
 - Real-time long-connection events are the normal path.
-- Startup, reconnect, manual sync, and hourly automatic inspection reconcile missed messages.
+- Startup and manual sync reconcile missed messages. A confirmed SDK reconnect wakes an immediate reconciliation for every bound group; the existing hourly inspection remains the periodic catch-up fallback only for workstreams where it is enabled. Reconciliation does not start Codex when no new message is found. Serialize concurrent history pulls without holding the lock during task execution.
 - Each scheduled inspection reads the current durable `processing` batch without waiting for it. The default three-line report places elapsed time and the latest safe user-visible Codex update in its first line; a customized inspection with that report disabled sends one hourly-idempotent progress-only message while active. Idle and opted-out projects receive no progress-only message.
-- A trusted user-level Codex `SessionStart` Hook starts the demand-only Listener on session startup/resume; it never replaces unrelated hooks or creates OS login startup.
+- A trusted user-level Codex `SessionStart` Hook starts the demand-only Listener on session startup/resume; repeated starts are idempotent and never kill an already-running Listener, and the Hook never replaces unrelated hooks or creates OS login startup.
 - Hook installation does not alter project-level hourly inspection, Token usage reporting, reminders, or other scheduled work. Those remain independently configured per workstream.
 - Queue by Feishu `message_id`; ignore duplicate, bot, and system messages.
 - Claim atomically, retry visibly, and retain terminal failures for diagnosis.

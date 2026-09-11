@@ -12,6 +12,7 @@ import plistlib
 import subprocess
 from typing import Any
 
+from bootstrap import codex_cli_candidate
 from gateway_common import REMOTE_STATE
 
 
@@ -93,11 +94,19 @@ def install_macos() -> dict[str, Any]:
     python = runtime_python("Darwin")
     if not python.exists():
         raise RuntimeError(f"Runtime Python is missing: {python}; run bootstrap.py install first")
+    codex = codex_cli_candidate()
+    if codex is None:
+        raise RuntimeError("Codex CLI is missing; open Codex or set CODEX_CLI_PATH before installing the Listener")
+    codex = codex.resolve()
     logs = REMOTE_STATE / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     payload = {
         "Label": LABEL,
         "ProgramArguments": [str(python), str(SCRIPT_DIR / "supervisor.py")],
+        # launchd does not inherit an interactive shell's environment. Persist
+        # the executable discovered during setup instead of hoping `codex` is
+        # later available on launchd's restricted PATH.
+        "EnvironmentVariables": {"CODEX_CLI_PATH": str(codex)},
         "RunAtLoad": False,
         "KeepAlive": False,
         "ProcessType": "Background",
@@ -164,7 +173,10 @@ def start_listener() -> dict[str, Any]:
     if current == "Darwin":
         if not mac_registered():
             install_macos()
-        result = _run(["launchctl", "kickstart", "-k", f"{mac_domain()}/{LABEL}"])
+        # SessionStart may run whenever Codex is opened or resumed.  Do not use
+        # launchctl's `-k` option here: it kills an already-running service
+        # before restarting it and could interrupt an active remote task.
+        result = _run(["launchctl", "kickstart", f"{mac_domain()}/{LABEL}"])
         if result.returncode != 0:
             raise RuntimeError(result.stderr.strip() or "Could not start macOS Listener agent")
         return {"ok": True, "platform": current, "launcher": LABEL}

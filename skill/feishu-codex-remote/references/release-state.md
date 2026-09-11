@@ -5,13 +5,14 @@ Use this document to distinguish implemented behavior from release targets. A ta
 ## Confirmed Product Direction
 
 - The product is a thin Feishu control surface for a local Codex, not a new agent platform.
+- Position it as a small DIY-friendly foundation: setup is automated where practical, while account, permission, and platform differences may still require guided user participation. Its value includes being easy to adapt through later Codex conversation, not pretending to be a fully managed service.
 - The main value is reliable, ordered mobile input through Feishu, including messages sent while the computer is offline, followed by local processing after it comes back online.
-- First-run setup should concentrate unavoidable human actions at the beginning. The desired experience is one natural-language request such as `把当前项目连接到我的飞书`, one QR scan or equivalent Feishu authorization, and automatic completion of the remaining safe setup.
+- First-run setup should concentrate unavoidable human actions at the beginning. The desired experience is one natural-language request such as `把当前项目连接到我的飞书`, one QR scan or equivalent Feishu authorization, and automatic completion of the remaining safe setup where the account and platform permit it; do not promise a fully unattended installation.
 - Codex may use computer-use or the signed-in browser to complete Feishu console configuration when needed. It must pause for QR scanning, account selection, consent, CAPTCHA, tenant-admin approval, paid upgrades, or other actions that require the user's identity or authority.
 - Normal use stays in natural-language chat. Codex already owns planning, editing, tests, recovery, and multi-agent behavior; the bridge should not duplicate these as a dashboard or command system.
 - Complex results may be delivered as private Feishu documents, with a concise group reply and a document link. Direct replies remain the default for simple results.
 - Users do not need to understand internal project keys or thread IDs. A Feishu group is bound by its stable `chat_id` to an exact local working directory and persistent Codex thread; renaming the group must not affect the binding. The local folder name may be used only as an initial display name.
-- Reuse one verified compatible Feishu application across additional groups. Before any app creation, inventory known user-level registries, Listener configurations, protected credential metadata, and the selected personal tenant's self-built apps; create another app only after recording exact incompatibility evidence or receiving an explicit isolation request. Do not consolidate working legacy apps as a side effect of new-project setup.
+- Reuse one verified compatible Feishu application across additional groups. Before any app creation, inventory known user-level registries, Listener configurations, protected credential metadata, and the approved tenant's self-built apps; create another app only after recording exact incompatibility evidence or receiving an explicit isolation request. Default to and recommend a personal tenant for first-time setup; use a team tenant only when the requested destination is explicitly inside it and the user accepts its administrator and organizational implications. Do not consolidate working legacy apps as a side effect of new-project setup.
 - Enable an hourly scheduled inspection by default. Describe it to users as `自动巡检`, not as a heartbeat: when the computer and Codex are available, it starts or checks the Listener, reconciles missed messages, and asks the Listener to process backlog. Let the user change its interval, pause it, resume it, or disable it in natural language.
 - Send a formal explanation on the first inspection. On later unchanged runs, default to exactly three short lines: message/Listener state, Token plan usage, and a natural-language customization reminder. Let a user's later conversational change override this default.
 - Start the demand-only Listener from a trusted user-level Codex `SessionStart` Hook on `startup|resume`. Do not describe it as OS login startup. Keep the hourly inspection for reports, reminders, and reconciliation rather than making it the only Listener starter.
@@ -60,11 +61,12 @@ Generalize the proven reminder interaction without importing project-specific he
 - When several active reminders could match “完成了” or “取消它”, ask which one rather than closing one by guess.
 - Keep reminder content scoped to the bound workstream and never copy private records from another project.
 
-## Current Release Baseline (2026-08-12)
+## Current Release Baseline (2026-09-11)
 
 | Capability | Current state |
 | --- | --- |
 | Durable ordered Feishu inbox, offline recovery, persistent Codex thread | Implemented and covered by deterministic tests |
+| Missed-event reconciliation | Implemented at startup and confirmed SDK reconnect, plus the existing hourly catch-up for opted-in workstreams; real macOS interruption testing remains |
 | Direct Feishu replies and private-document routing | Implemented; explicit in-project Markdown images are sent as native image replies and explicit PDF/Excel deliverables as native file replies after tenant verification; private documents and private-file links remain the fallback for complex content and other artifacts |
 | One-prompt installer | Skill workflow and runtime bootstrap implemented; real clean-machine/CUA onboarding not yet accepted |
 | QR/login-based Feishu authorization | Browser OAuth with a localhost callback is implemented and can use Feishu's QR login when offered; real clean-account testing remains |
@@ -75,8 +77,8 @@ Generalize the proven reminder interaction without importing project-specific he
 | Deterministic natural-language changes to inspection schedule | Not implemented; do not promise a specific sub-hour cadence until Codex Automation support is verified |
 | General natural-language reminder persistence | Implemented as a project-scoped append-only log with continuous and one-time modes; real Feishu end-to-end testing remains |
 | Windows listener lifecycle | Preserved with PowerShell and Windows Task Scheduler |
-| macOS listener lifecycle | Implemented with a Python wrapper and per-user demand-start `launchd`; real Mac test pending |
-| Portable credential storage | Implemented as Windows DPAPI or macOS Keychain; real Mac test pending |
+| macOS listener lifecycle | Implemented with a Python wrapper, per-user demand-start `launchd`, an explicit persisted `CODEX_CLI_PATH`, and non-destructive repeated SessionStart behavior matching Windows; real Mac test pending |
+| Portable credential storage | Implemented as Windows DPAPI or macOS Keychain using the absolute system security tool; real launchd-context Mac test pending |
 | Conversational uninstall | Implemented with preview, active-work refusal, component-scoped removal, recovery-by-default, and explicit local-data purge; clean-machine test pending |
 | Clean-machine packaging and public installation test | Not completed |
 
@@ -110,5 +112,6 @@ These are design candidates only; none is a finished product rule yet.
 - No app secret, token, tenant ID, chat ID, local username, private path, or conversation content exists in the package or logs by default.
 - Direct reply, native image reply, private-document reply, offline queue recovery, duplicate-event handling, restart recovery, and uninstall instructions pass on a clean Windows account.
 - The same suite passes on a clean macOS account before macOS is called supported.
+- A released/enabled Feishu app version receives a real user event and history reconciliation; send-only bot behavior is not acceptance.
 - The generated Feishu app uses least privilege, generated documents remain non-public, and no public endpoint is required unless the user separately approves and secures it.
 - Uninstall removes only Skill-owned launchers, environments, and state after showing the exact targets; it never deletes Feishu conversations or generated documents.

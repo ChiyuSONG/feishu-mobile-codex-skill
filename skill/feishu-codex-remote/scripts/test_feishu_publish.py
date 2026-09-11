@@ -13,6 +13,20 @@ import feishu_publish
 
 
 class FeishuPublishTests(unittest.TestCase):
+    def test_protected_state_access_error_is_actionable_and_does_not_expose_path(self):
+        with patch.object(
+            feishu_publish,
+            "load_protected_bytes",
+            side_effect=feishu_publish.GatewayError(
+                "Feishu credential is missing or inaccessible in macOS Keychain; unlock the login keychain"
+            ),
+        ):
+            with self.assertRaises(feishu_publish.PublishError) as raised:
+                feishu_publish.load_protected(Path("redacted-profile/publisher/secret.bin"))
+        message = str(raised.exception)
+        self.assertIn("unlock the login keychain", message)
+        self.assertNotIn("redacted-profile", message)
+
     def test_effective_scopes_upgrades_legacy_configuration(self):
         scopes = feishu_publish.effective_scopes({"scopes": "drive:drive offline_access"}).split()
         self.assertEqual(scopes.count("drive:drive"), 1)

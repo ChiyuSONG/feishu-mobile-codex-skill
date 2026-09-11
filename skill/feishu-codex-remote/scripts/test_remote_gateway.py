@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -522,15 +523,6 @@ class RoutingTests(unittest.TestCase):
         self.assertIn("不会访问其他项目", text)
         self.assertIn("自动巡检当前已关闭", text)
         self.assertNotIn(r"C:\runtime\hello", text)
-
-    def test_hourly_catch_up_project_keys_honors_per_project_opt_out(self):
-        workers = {
-            "default": SimpleNamespace(project={"working_directory": r"C:\project"}),
-            "disabled": SimpleNamespace(
-                project={"working_directory": r"C:\runtime\hello", "hourly_catch_up_enabled": False}
-            ),
-        }
-        self.assertEqual(remote_gateway.hourly_catch_up_project_keys(workers), ["default"])
 
     def test_send_welcome_uses_utf8_text_and_stable_uuid(self):
         class Client:
@@ -1303,6 +1295,121 @@ class ContextBridgeTests(unittest.TestCase):
             self.assertEqual(result["recent_messages"][0]["text"], "尚未处理的问题")
             self.assertEqual(result["transcript"][0]["text"], "继续飞书任务")
             self.assertEqual(result["transcript"][1]["text"], "远程答案")
+
+
+class ReconciliationTests(unittest.TestCase):
+    def test_hourly_catch_up_project_keys_honors_per_project_opt_out(self):
+        workers = {
+            "default": SimpleNamespace(project={"working_directory": r"C:\project"}),
+            "disabled": SimpleNamespace(
+                project={"working_directory": r"C:\runtime\hello", "hourly_catch_up_enabled": False}
+            ),
+        }
+        self.assertEqual(remote_gateway.hourly_catch_up_project_keys(workers), ["default"])
+        self.assertEqual(
+            remote_gateway.scheduled_catch_up_project_keys(workers, reconnected=False),
+            ["default"],
+        )
+        self.assertEqual(
+            remote_gateway.scheduled_catch_up_project_keys(workers, reconnected=True),
+            ["default", "disabled"],
+        )
+
+    def test_reconnect_callback_only_wakes_background_reconciliation(self):
+        signal = threading.Event()
+        client = SimpleNamespace(on_reconnected=None)
+        self.assertTrue(remote_gateway.attach_reconnect_reconciliation(client, signal))
+        self.assertFalse(signal.is_set())
+        client.on_reconnected()
+        self.assertTrue(signal.is_set())
+        self.assertFalse(
+            remote_gateway.attach_reconnect_reconciliation(SimpleNamespace(), threading.Event())
+        )
+
+    def test_reconnect_reconciliation_can_include_hourly_opt_out_projects_and_isolate_failures(self):
+        class Client:
+            def __init__(self):
+                self.calls: list[str] = []
+
+            def list_messages(self, chat_id, _cursor):
+                self.calls.append(chat_id)
+                if chat_id == "chat_bad":
+                    raise RuntimeError("temporary history failure")
+                return []
+
+        class Worker:
+            def __init__(self, chat_id, hourly_enabled):
+                self.project = {
+                    "chat_id": chat_id,
+                    "registered_epoch": 1,
+                    "hourly_catch_up_enabled": hourly_enabled,
+                }
+                self.store = SimpleNamespace(state={"cursor": 1})
+
+            def enqueue(self, _message):
+                return False
+
+        service = object.__new__(remote_gateway.GatewayService)
+        service.client = Client()
+        service.log_path = Path("unused.log")
+        service.reconcile_lock = threading.Lock()
+        service.workers = {
+            "opted_out": Worker("chat_opted_out", False),
+            "bad": Worker("chat_bad", True),
+            "healthy": Worker("chat_healthy", True),
+        }
+        with patch.object(remote_gateway, "append_log"):
+            result = service.catch_up(continue_on_error=True, log_when_empty=False)
+        self.assertEqual(result, {"opted_out": 0, "healthy": 0})
+        self.assertEqual(service.client.calls, ["chat_opted_out", "chat_bad", "chat_healthy"])
+
+    def test_concurrent_reconciliation_calls_do_not_overlap(self):
+        entered = threading.Event()
+        release = threading.Event()
+
+        class Client:
+            def __init__(self):
+                self.active = 0
+                self.maximum = 0
+                self.calls = 0
+                self.lock = threading.Lock()
+
+            def list_messages(self, _chat_id, _cursor):
+                with self.lock:
+                    self.calls += 1
+                    self.active += 1
+                    self.maximum = max(self.maximum, self.active)
+                    current = self.calls
+                if current == 1:
+                    entered.set()
+                    release.wait(timeout=1)
+                with self.lock:
+                    self.active -= 1
+                return []
+
+        worker = SimpleNamespace(
+            project={"chat_id": "chat_1", "registered_epoch": 1},
+            store=SimpleNamespace(state={"cursor": 1}),
+            enqueue=lambda _message: False,
+        )
+        service = object.__new__(remote_gateway.GatewayService)
+        service.client = Client()
+        service.log_path = Path("unused.log")
+        service.reconcile_lock = threading.Lock()
+        service.workers = {"demo": worker}
+
+        with patch.object(remote_gateway, "append_log"):
+            first = threading.Thread(target=service.catch_up)
+            second = threading.Thread(target=service.catch_up)
+            first.start()
+            self.assertTrue(entered.wait(timeout=1))
+            second.start()
+            release.set()
+            first.join(timeout=1)
+            second.join(timeout=1)
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(service.client.maximum, 1)
 
 
 class StoreTests(unittest.TestCase):

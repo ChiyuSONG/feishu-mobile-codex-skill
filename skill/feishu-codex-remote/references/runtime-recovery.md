@@ -41,6 +41,22 @@ provider-capacity outcome. If native retry succeeds, deliver the normal answer.
 When explaining increased latency, use actual event evidence; do not invent a
 retry count or duration. Native retry policy belongs to Codex, not this bridge.
 
+## Persistent Thread Writer Conflicts
+
+Treat an `active writer` or equivalent persistent-thread ownership error as a
+thread diagnostic, not permission to delete or replay the Feishu inbox. Preserve
+the current thread ID, queue state, cursor, run receipt and event log. First
+identify the live owner and determine whether the previous turn is still active,
+stale, or has an unknown outcome. Do not kill an unrelated Codex process, reset
+the cursor, erase message history, or automatically create a replacement thread.
+
+If a replacement thread is necessary, pause admission through the existing
+maintenance lifecycle, retain a recovery copy of the old thread ID and state,
+and require explicit user approval before rebinding the main conversation. Resume
+only the messages whose prior outcome is known not to have completed, then verify
+ordering and reply delivery before reopening admission. This conservative repair
+prevents duplicated side effects and silent loss of conversation continuity.
+
 ## Paginated Fork Recovery
 
 Try native `thread/fork` first. `excludeTurns=true` reduces the returned metadata

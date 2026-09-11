@@ -68,9 +68,12 @@ def save_protected(path: Path, value: dict | str) -> None:
 
 
 def load_protected(path: Path):
-    if not protected_exists(path):
-        raise PublishError(f"Missing protected local state: {path}")
-    raw = load_protected_bytes(path)
+    try:
+        raw = load_protected_bytes(path)
+    except GatewayError as exc:
+        raise PublishError(
+            f"Cannot load protected local state ({credential_backend()}): {exc}"
+        ) from exc
     text = raw.decode("utf-8")
     try:
         return json.loads(text)
@@ -329,8 +332,10 @@ def effective_scopes(config: dict) -> str:
 
 def authenticate(args: argparse.Namespace) -> dict:
     config = load_config()
-    if not protected_exists(SECRET_PATH):
-        raise PublishError("App Secret is not configured")
+    # Fail before opening the browser when the current macOS launch context
+    # cannot read Keychain.  A Keychain denial must not masquerade as a missing
+    # credential, because those require different recovery steps.
+    load_protected(SECRET_PATH)
     parsed = urllib.parse.urlparse(config["redirect_uri"])
     if parsed.hostname not in {"127.0.0.1", "localhost"}:
         raise PublishError("Redirect URI must use localhost")

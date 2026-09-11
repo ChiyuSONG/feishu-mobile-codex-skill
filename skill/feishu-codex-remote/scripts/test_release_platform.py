@@ -4,6 +4,7 @@ import base64
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
+import plistlib
 from types import SimpleNamespace
 import subprocess
 import tempfile
@@ -32,6 +33,12 @@ class SetupContractTests(unittest.TestCase):
         self.assertIn("im:resource", setup)
         self.assertIn("Do not continue to project binding, welcome, or the success report", setup)
 
+    def test_setup_requires_app_activation_and_real_inbound_message(self):
+        setup = (SKILL_ROOT / "references" / "setup.md").read_text(encoding="utf-8")
+        self.assertIn("app-version creation, release, enablement", setup)
+        self.assertIn("receive a real user message and read history", setup)
+        self.assertIn("can only send messages has not passed setup", setup)
+
     def test_setup_success_requires_a_visible_real_image_before_welcome(self):
         setup = (SKILL_ROOT / "references" / "setup.md").read_text(encoding="utf-8")
         visible = setup.index("user confirms the image is visible")
@@ -46,7 +53,7 @@ class SetupContractTests(unittest.TestCase):
         self.assertIn("permissions needed for messages, images/files, and private documents", english)
         self.assertIn("real test image", english)
 
-    def test_team_tenant_requires_explicit_informed_opt_in_before_app_creation(self):
+    def test_personal_is_default_and_team_tenant_requires_explicit_targeted_opt_in(self):
         skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
         setup = (SKILL_ROOT / "references" / "setup.md").read_text(encoding="utf-8")
         chinese = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
@@ -55,10 +62,23 @@ class SetupContractTests(unittest.TestCase):
         account_gate = setup.index("Before CUA clicks any create-app control")
         app_inventory = setup.index("before creating any app")
         self.assertLess(account_gate, app_inventory)
+        self.assertIn("Default to and recommend a personal account for first-time setup", setup)
+        self.assertIn("explicitly targets a group under that tenant", setup)
+        self.assertIn("team-tenant consent alone is not consent for unrestricted member access", setup)
         self.assertIn("Silence and a broad request to automate setup are not consent", setup)
-        self.assertIn("only after explicit informed consent", skill)
-        self.assertIn("务必在个人账号下创建应用", chinese)
-        self.assertIn("Create the app under your personal account", english)
+        self.assertIn("user gives informed consent for that specific tenant", skill)
+        self.assertIn("默认并推荐个人版飞书", chinese)
+        self.assertIn("明确目标就是接入某个公司飞书账号下的工作群", chinese)
+        self.assertIn("personal Feishu account is the default and recommended choice", english)
+        self.assertIn("explicit goal is to connect a group under that company account", english)
+
+    def test_readmes_set_diy_expectations_without_presenting_examples_as_defaults(self):
+        chinese = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        english = (REPO_ROOT / "README_EN.md").read_text(encoding="utf-8")
+        self.assertIn("不是完全托管式服务", chinese)
+        self.assertIn("这些属于按需 DIY 的扩展，不是默认开启的功能", chinese)
+        self.assertIn("not a fully managed service", english)
+        self.assertIn("opt-in DIY extensions, not default features", english)
 
 
 class PlatformTests(unittest.TestCase):
@@ -150,8 +170,20 @@ class PlatformTests(unittest.TestCase):
             gateway_common.save_protected(target, secret, system="Darwin")
             loaded = gateway_common.load_protected(target, system="Darwin")
         self.assertEqual(loaded, secret)
-        self.assertTrue(any(call[:2] == ["security", "add-generic-password"] for call in calls))
-        self.assertTrue(any(call[:2] == ["security", "find-generic-password"] for call in calls))
+        self.assertTrue(any(call[:2] == ["/usr/bin/security", "add-generic-password"] for call in calls))
+        self.assertTrue(any(call[:2] == ["/usr/bin/security", "find-generic-password"] for call in calls))
+
+    def test_macos_keychain_denial_has_actionable_error_without_secret(self):
+        secret = b"must-not-appear"
+
+        def fake_run(command, **_kwargs):
+            return subprocess.CompletedProcess(command, 36, stdout="", stderr="User interaction is not allowed")
+
+        with patch.object(gateway_common.subprocess, "run", side_effect=fake_run):
+            with self.assertRaises(gateway_common.GatewayError) as raised:
+                gateway_common.save_protected(Path("publisher") / "secret.bin", secret, system="Darwin")
+        self.assertIn("unlock the login keychain", str(raised.exception))
+        self.assertNotIn(secret.decode(), str(raised.exception))
 
     def test_macos_listener_is_demand_start_launch_agent(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -159,6 +191,9 @@ class PlatformTests(unittest.TestCase):
             python = root / "runtime" / "bin" / "python"
             python.parent.mkdir(parents=True)
             python.write_text("", encoding="utf-8")
+            codex = root / "bin" / "codex"
+            codex.parent.mkdir(parents=True)
+            codex.write_text("", encoding="utf-8")
             plist = root / "LaunchAgents" / "listener.plist"
             runs: list[list[str]] = []
 
@@ -168,6 +203,7 @@ class PlatformTests(unittest.TestCase):
 
             with (
                 patch.object(listener_control, "runtime_python", return_value=python),
+                patch.object(listener_control, "codex_cli_candidate", return_value=codex),
                 patch.object(listener_control, "mac_plist_path", return_value=plist),
                 patch.object(listener_control, "mac_domain", return_value="gui/501"),
                 patch.object(listener_control, "mac_registered", return_value=False),
@@ -175,11 +211,47 @@ class PlatformTests(unittest.TestCase):
                 patch.object(listener_control, "_run", side_effect=fake_run),
             ):
                 result = listener_control.install_macos()
-            payload = plist.read_text(encoding="utf-8")
+            payload_text = plist.read_text(encoding="utf-8")
+            payload = plistlib.loads(plist.read_bytes())
         self.assertTrue(result["demand_start_only"])
-        self.assertIn("<key>RunAtLoad</key>\n\t<false/>", payload)
-        self.assertIn("supervisor.py", payload)
+        self.assertIn("<key>RunAtLoad</key>\n\t<false/>", payload_text)
+        self.assertIn("supervisor.py", payload_text)
+        self.assertEqual(payload["EnvironmentVariables"]["CODEX_CLI_PATH"], str(codex.resolve()))
         self.assertTrue(any("bootstrap" in call for call in runs))
+
+    def test_macos_listener_refuses_install_without_codex_cli(self):
+        with tempfile.TemporaryDirectory() as raw:
+            python = Path(raw) / "runtime" / "bin" / "python"
+            python.parent.mkdir(parents=True)
+            python.write_text("", encoding="utf-8")
+            with (
+                patch.object(listener_control, "runtime_python", return_value=python),
+                patch.object(listener_control, "codex_cli_candidate", return_value=None),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "Codex CLI is missing"):
+                    listener_control.install_macos()
+
+    def test_macos_session_start_never_force_restarts_running_listener(self):
+        runs: list[list[str]] = []
+
+        def fake_run(command):
+            runs.append(list(command))
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        with (
+            patch.object(listener_control.platform, "system", return_value="Darwin"),
+            patch.object(listener_control, "mac_registered", return_value=True),
+            patch.object(listener_control, "mac_domain", return_value="gui/501"),
+            patch.object(listener_control, "_run", side_effect=fake_run),
+        ):
+            result = listener_control.start_listener()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            runs,
+            [["launchctl", "kickstart", "gui/501/feishu-codex-remote.listener"]],
+        )
+        self.assertNotIn("-k", runs[0])
 
     def test_macos_automation_uses_python_wrapper(self):
         with (

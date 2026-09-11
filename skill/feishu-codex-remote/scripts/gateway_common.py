@@ -35,6 +35,7 @@ CONFIG_PATH = REMOTE_STATE / "config.json"
 SECRET_PATH = PUBLISH_STATE / "secret.bin"
 PUBLISH_CONFIG_PATH = PUBLISH_STATE / "config.json"
 KEYCHAIN_SERVICE = "feishu-codex-remote"
+MACOS_SECURITY = "/usr/bin/security"
 
 
 class GatewayError(RuntimeError):
@@ -105,7 +106,7 @@ def save_protected(path: Path, data: bytes, *, system: str | None = None) -> Non
         encoded = base64.b64encode(data).decode("ascii")
         result = subprocess.run(
             [
-                "security",
+                MACOS_SECURITY,
                 "add-generic-password",
                 "-U",
                 "-s",
@@ -120,7 +121,9 @@ def save_protected(path: Path, data: bytes, *, system: str | None = None) -> Non
             check=False,
         )
         if result.returncode != 0:
-            raise GatewayError("Could not save credentials in macOS Keychain")
+            raise GatewayError(
+                "Could not save credentials in macOS Keychain; unlock the login keychain and retry"
+            )
         return
     raise GatewayError(f"Unsupported credential platform: {current}")
 
@@ -134,7 +137,7 @@ def load_protected(path: Path, *, system: str | None = None) -> bytes:
     if current == "Darwin":
         result = subprocess.run(
             [
-                "security",
+                MACOS_SECURITY,
                 "find-generic-password",
                 "-s",
                 KEYCHAIN_SERVICE,
@@ -147,7 +150,10 @@ def load_protected(path: Path, *, system: str | None = None) -> bytes:
             check=False,
         )
         if result.returncode != 0:
-            raise GatewayError("Missing credential in macOS Keychain")
+            raise GatewayError(
+                "Feishu credential is missing or inaccessible in macOS Keychain; "
+                "unlock the login keychain and allow the current-user Listener to access it"
+            )
         return base64.b64decode(result.stdout.strip())
     raise GatewayError(f"Unsupported credential platform: {current}")
 
@@ -159,7 +165,7 @@ def protected_exists(path: Path, *, system: str | None = None) -> bool:
     if current == "Darwin":
         result = subprocess.run(
             [
-                "security",
+                MACOS_SECURITY,
                 "find-generic-password",
                 "-s",
                 KEYCHAIN_SERVICE,
@@ -182,7 +188,7 @@ def delete_protected(path: Path, *, system: str | None = None) -> None:
     if current == "Darwin":
         subprocess.run(
             [
-                "security",
+                MACOS_SECURITY,
                 "delete-generic-password",
                 "-s",
                 KEYCHAIN_SERVICE,
@@ -231,9 +237,10 @@ def load_app_credentials(config: dict[str, Any]) -> tuple[str, str]:
     app_id = str(config.get("app_id") or "").strip()
     if app_id != str(publish_config.get("app_id") or "").strip():
         raise GatewayError("Remote gateway app_id does not match the verified publisher app")
-    if not protected_exists(SECRET_PATH):
-        raise GatewayError(f"Missing protected Feishu App Secret ({credential_backend()})")
-    secret = load_protected(SECRET_PATH).decode("utf-8")
+    try:
+        secret = load_protected(SECRET_PATH).decode("utf-8")
+    except GatewayError as exc:
+        raise GatewayError(f"Cannot load protected Feishu App Secret ({credential_backend()}): {exc}") from exc
     if not app_id.startswith("cli_") or len(secret.strip()) < 16:
         raise GatewayError("Invalid Feishu application credentials")
     return app_id, secret.strip()

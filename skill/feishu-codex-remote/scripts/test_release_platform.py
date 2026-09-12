@@ -49,9 +49,9 @@ class SetupContractTests(unittest.TestCase):
         chinese = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
         english = (REPO_ROOT / "README_EN.md").read_text(encoding="utf-8")
         self.assertIn("图片/文件和私有文档所需权限", chinese)
-        self.assertIn("真实测试图片", chinese)
+        self.assertIn("在飞书中收到测试图片和欢迎消息，即完成连接", chinese)
         self.assertIn("permissions needed for messages, images/files, and private documents", english)
-        self.assertIn("real test image", english)
+        self.assertIn("connection is complete when you receive the test image and welcome message in Feishu", english)
 
     def test_personal_is_default_and_team_tenant_requires_explicit_targeted_opt_in(self):
         skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
@@ -69,9 +69,10 @@ class SetupContractTests(unittest.TestCase):
         self.assertIn("user gives informed consent for that specific tenant", skill)
         self.assertIn("默认并推荐个人版飞书", chinese)
         self.assertIn("明确目标就是接入某个公司飞书账号下的工作群", chinese)
-        self.assertIn("确认接受管理员审批和组织可见性", chinese)
+        self.assertIn("接受组织可见性和管理员审批等影响", chinese)
         self.assertIn("personal Feishu account is the default and recommended choice", english)
-        self.assertIn("only when your request explicitly targets a group under that account", english)
+        self.assertIn("only when your explicit goal is to connect a group under that company account", english)
+        self.assertIn("accept the organizational visibility and administrator-approval implications", english)
 
     def test_readmes_set_diy_expectations_without_presenting_examples_as_defaults(self):
         chinese = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
@@ -90,7 +91,8 @@ class SetupContractTests(unittest.TestCase):
             self.assertIn("https://github.com/ChiyuSONG/feishu-mobile-codex-skill", readme)
             self.assertNotIn("https://github.com/ChiyuSONG/feishu-codex-remote", readme)
             self.assertIn("skill/feishu-codex-remote", readme)
-        self.assertLess(chinese.index("想在安卓或华为手机上远程使用 Codex"), chinese.index("你可以在飞书里连续"))
+        self.assertLess(chinese.index("想在安卓或华为手机上远程使用 Codex"), chinese.index("## 它能帮你做什么"))
+        self.assertLess(english.index("Want to use Codex remotely"), english.index("## What it can do for you"))
 
 
 class PlatformTests(unittest.TestCase):

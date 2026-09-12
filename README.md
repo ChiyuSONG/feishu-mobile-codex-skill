@@ -1,4 +1,4 @@
-# 飞书 Codex 遥控器
+# 飞书 Codex 遥控器 Skill
 
 [English](README_EN.md)
 

@@ -1,4 +1,4 @@
-# Feishu Codex Remote Control
+# Feishu Codex Remote Control Skill
 
 [中文](README.md)
 

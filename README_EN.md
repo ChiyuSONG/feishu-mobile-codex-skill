@@ -2,9 +2,9 @@
 
 [中文](README.md)
 
-A DIY-friendly mobile entrance to your local Codex. Start installation with one prompt and, when the environment is ready, aim to complete the first connection in about 15 minutes.
+A DIY-friendly mobile assistant for your local Codex, freely configurable around your personal workflow. Start installation with one prompt and, when the environment is ready, aim to complete the first connection in about 15 minutes. Once connected, keep adjusting it to suit how you work.
 
-If you are looking for a practical way to use remote Codex from an Android or Huawei phone, or to connect Feishu to local Codex without depending on the ChatGPT/Codex mobile app, this small tool provides a simple path. It does not require exposing your local project to the public internet or running a separate management dashboard.
+Want to use Codex remotely from an Android or Huawei phone, or tired of waiting for ChatGPT to reconnect every time you send a task? This small tool provides a simple path: turn Feishu into a remote control for Codex, without exposing your local project to the public internet or running a separate management dashboard.
 
 Send tasks to Codex continuously from Feishu without waiting for the previous task to finish. The computer and Codex must remain running for tasks to execute and return results. When either is closed, Feishu can still receive new messages and keep them pending; Codex processes them in order after it opens again. Remote outputs such as screenshots, Excel workbooks, and PDFs can also be viewed or downloaded through Feishu.
 

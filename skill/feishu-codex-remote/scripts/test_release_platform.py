@@ -80,9 +80,9 @@ class SetupContractTests(unittest.TestCase):
         self.assertIn("这些属于按需 DIY 的扩展，不是默认开启的功能", chinese)
         self.assertIn("not a fully managed service", english)
         self.assertIn("opt-in DIY extensions, not default features", english)
-        self.assertTrue(chinese.split("\n\n")[2].startswith("一个可 DIY 的本地 Codex 手机入口"))
-        self.assertTrue(english.split("\n\n")[2].startswith("A DIY-friendly mobile entrance"))
-        self.assertLess(chinese.index("如果你想知道"), chinese.index("你可以在飞书里连续"))
+        self.assertTrue(chinese.split("\n\n")[2].startswith("一个可 DIY 的本地 Codex 手机助手"))
+        self.assertTrue(english.split("\n\n")[2].startswith("A DIY-friendly mobile assistant"))
+        self.assertLess(chinese.index("想在安卓或华为手机上远程使用 Codex"), chinese.index("你可以在飞书里连续"))
 
 
 class PlatformTests(unittest.TestCase):

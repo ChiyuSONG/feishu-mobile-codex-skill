@@ -1,4 +1,4 @@
-# Feishu Remote Codex
+# Feishu Remote Codex: A DIY-Friendly Mobile Assistant
 
 [中文](README.md)
 
@@ -130,6 +130,14 @@ Codex remembers the item and keeps reminding you during inspections after that t
 These reminders depend on the computer, Codex, and automatic inspection; they are not exact-time alarms. Use Feishu Calendar or a phone alarm for anything that must happen at an exact time.
 
 ## Frequently asked questions
+
+### How can I use Codex remotely from an Android or Huawei phone?
+
+After installing this tool and connecting Feishu on your computer, send tasks to the bound group from Feishu on your phone. Results return to Feishu as well. Your phone must be able to use Feishu normally, and the computer and Codex must remain running with working access to the service.
+
+### Do I still need the ChatGPT app on my phone when using Feishu?
+
+No. Sending tasks and receiving results through this tool only requires Feishu on your phone, not the ChatGPT mobile app. You still need Codex installed and signed in on your computer, with working network access.
 
 ### Do the computer and Codex need to stay on?
 

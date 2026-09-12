@@ -1,4 +1,4 @@
-# Feishu Remote Codex: A DIY-Friendly Mobile Assistant
+# Feishu Codex Remote Control
 
 [中文](README.md)
 
@@ -163,7 +163,7 @@ No. Simple replies are sent directly in the group; private Feishu documents are 
 
 No command is required. Tell Codex:
 
-> Uninstall Feishu Remote Codex. Keep my Feishu conversations and documents, tell me what will be removed first, and then complete the uninstall automatically.
+> Uninstall Feishu Codex Remote Control. Keep my Feishu conversations and documents, tell me what will be removed first, and then complete the uninstall automatically.
 
 Codex first lists what it plans to remove and waits for confirmation. Uninstalling does not affect unrelated Codex tasks and never deletes Feishu conversations, groups, or generated documents.
 

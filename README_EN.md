@@ -74,8 +74,8 @@ The connection is complete when you receive the test image and welcome message i
 Send messages just as you normally talk to Codex:
 
 - `Review the latest code changes, fix any issues you find, run the tests, and send me the results.`
-- `Summarize this sales sheet by product, identify the largest sales declines, and send me an Excel workbook.`
-- `Remind me every Friday at 5 PM to submit my weekly report, and keep reminding me until I say it is submitted.`
+- `# Based on the requirements we just discussed, prepare a separate acceptance checklist without waiting for the code changes to finish.`
+- `* Remind me every Friday at 5 PM to submit my weekly report, and keep reminding me until I say it is submitted.`
 
 You can send messages continuously in the same Feishu group. Codex uses the context to identify follow-up details for the same task and combine them for processing, while different tasks are queued and processed sequentially. Start a message with `*` to force separate processing without automatically merging it with other messages, or `#` to start an independent context inherited from the current conversation and begin processing in parallel immediately. Automatic inspection checks connection and task status hourly by default. Tasks do not run while the computer or Codex is closed, but messages stored in Feishu are not lost; processing resumes automatically when Codex opens again.
 

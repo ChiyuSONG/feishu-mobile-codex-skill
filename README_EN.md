@@ -1,10 +1,10 @@
-# Feishu Codex Remote Control Skill
+# Feishu Mobile Codex Skill
 
 [中文](README.md)
 
-A DIY-friendly mobile assistant for your local Codex, freely configurable around your personal workflow. Start installation with one prompt and, when the environment is ready, aim to complete the first connection in about 15 minutes. Once connected, keep adjusting it to suit how you work.
+A DIY-friendly Codex mobile assistant: connect to Codex on your computer through Feishu and configure it around your personal workflow. Start installation with one prompt and, when the environment is ready, aim to complete the first connection in about 15 minutes. Once connected, keep adjusting it to suit how you work.
 
-Want to use Codex remotely from an Android or Huawei phone, or tired of waiting for ChatGPT to reconnect every time you send a task? This small tool provides a simple path: turn Feishu into a remote control for Codex, without exposing your local project to the public internet or running a separate management dashboard.
+Want to use Codex remotely from an Android or Huawei phone, or tired of waiting for ChatGPT to reconnect every time you send a task? This Skill provides a simple path: send tasks to Codex on your computer and receive results through Feishu, without exposing the project on your computer to the public internet or running a separate management dashboard.
 
 Send tasks to Codex continuously from Feishu without waiting for the previous task to finish. The computer and Codex must remain running for tasks to execute and return results. When either is closed, Feishu can still receive new messages and keep them pending; Codex processes them in order after it opens again. Remote outputs such as screenshots, Excel workbooks, and PDFs can also be viewed or downloaded through Feishu.
 
@@ -20,10 +20,10 @@ It automates setup wherever practical, but it is not a fully managed service. Di
 - Send several ideas and requirements continuously and let Codex process them in order;
 - Hand tasks to Codex through Feishu while away from the computer instead of saving them in a notes app for later;
 - Receive short results directly; screenshots appear as native Feishu images, explicitly delivered PDFs and Excel workbooks arrive as chat attachments, and long tutorials or complex layouts use private Feishu documents;
-- Keep one Feishu group connected to one local project, even if the group is renamed;
+- Keep one Feishu group connected to one project on your computer, even if the group is renamed;
 - Check message status and Codex usage, or create follow-up reminders through chat instructions.
 
-These are ready-to-use foundations, not a fixed feature ceiling. After installation, simply talk to Codex to adjust existing behavior or add features that fit your workflow. For example:
+These are the basic features available after installation and connection, not a fixed feature ceiling. After installation, simply talk to Codex to adjust existing behavior or add features that fit your workflow. For example:
 
 - Collect and post a daily industry-news digest;
 - Let colleagues submit work questions by mentioning the bot after agreeing on the team tenant, group membership, and local permission boundary;
@@ -35,7 +35,7 @@ These are opt-in DIY extensions, not default features, and Codex implements and 
 
 - A Windows or Mac computer with Codex installed and signed in;
 - A working Feishu account. For a first setup, a **personal Feishu account is the default and recommended choice** because it has the lowest organizational risk and usually avoids team-admin involvement. Use a team account only when your explicit goal is to connect a group under that company account and you accept the organizational visibility and administrator-approval implications;
-- A local Project already created in Codex that you want to manage remotely through Feishu.
+- A project already created in Codex on your computer that you want to manage remotely through Feishu.
 
 Windows is ready for trial use. macOS support is currently Beta, so pay attention to any system guidance Codex provides during the first setup. Python 3.10 or later is required; if it is missing, Codex explains the requirement and helps you handle it first.
 
@@ -45,7 +45,7 @@ Windows is ready for trial use. macOS support is currently Beta, so pay attentio
 
 Copy this instruction and send it to Codex:
 
-> Install the `skill/feishu-codex-remote` Skill from https://github.com/ChiyuSONG/feishu-codex-remote.
+> Install the `skill/feishu-codex-remote` Skill from https://github.com/ChiyuSONG/feishu-mobile-codex-skill.
 
 Alternatively, copy [`skill/feishu-codex-remote`](skill/feishu-codex-remote) into the Codex Skills directory, then restart or refresh Codex. Do not copy the entire repository as one Skill.
 
@@ -55,7 +55,7 @@ In Codex, find the project you want to manage remotely through Feishu, open a co
 
 > Use `$feishu-codex-remote` to connect this project to my Feishu account. Automate everything possible and ask me only when I need to scan a QR code, sign in, or approve access.
 
-**During setup: local Codex settings**
+**During setup: Codex settings on your computer**
 
 We recommend **GPT-6 Astra** and **strongly recommend enabling Full Access** to reduce approval interruptions during installation. Choose reasoning effort and Fast mode as needed; neither has a required setting.
 
@@ -163,7 +163,7 @@ No. Simple replies are sent directly in the group; private Feishu documents are 
 
 No command is required. Tell Codex:
 
-> Uninstall Feishu Codex Remote Control. Keep my Feishu conversations and documents, tell me what will be removed first, and then complete the uninstall automatically.
+> Uninstall Feishu Mobile Codex Skill. Keep my Feishu conversations and documents, tell me what will be removed first, and then complete the uninstall automatically.
 
 Codex first lists what it plans to remove and waits for confirmation. Uninstalling does not affect unrelated Codex tasks and never deletes Feishu conversations, groups, or generated documents.
 
@@ -172,10 +172,10 @@ A recovery backup is kept by default. To also delete local credentials, cache, a
 ## Privacy and security
 
 - Default Full Access grants local execution capabilities, not permission to work across projects; you can switch to project-only access or per-action review through chat instructions;
-- Your local project does not need to be exposed to the public internet;
+- The project on your computer does not need to be exposed to the public internet;
 - Feishu credentials are stored outside the repository;
 - Public link sharing is disabled and verified for generated Feishu documents;
-- Each group connects only to the local project you explicitly select;
+- Each group connects only to the project on your computer that you explicitly select;
 - The repository does not store your credentials, conversations, project paths, or runtime history.
 
 See [SECURITY.md](SECURITY.md) for more information.

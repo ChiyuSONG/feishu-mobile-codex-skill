@@ -91,7 +91,7 @@ class SetupContractTests(unittest.TestCase):
             self.assertIn("https://github.com/ChiyuSONG/feishu-mobile-codex-skill", readme)
             self.assertNotIn("https://github.com/ChiyuSONG/feishu-codex-remote", readme)
             self.assertIn("skill/feishu-codex-remote", readme)
-        self.assertLess(chinese.index("想在安卓或华为手机上远程使用 Codex"), chinese.index("## 它能帮你做什么"))
+        self.assertLess(chinese.index("想在手机上远程使用 Codex"), chinese.index("## 它能帮你做什么"))
         self.assertLess(english.index("Want to use Codex remotely"), english.index("## What it can do for you"))
 
 

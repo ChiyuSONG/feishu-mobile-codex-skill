@@ -2401,9 +2401,12 @@ def init_project(args: argparse.Namespace) -> dict[str, Any]:
     }
     atomic_write_json(CONFIG_PATH, config)
     notice = (
-        "Default Full Access lets the local Codex process access the whole machine without interactive approvals. "
+        "Full Access lets the local Codex process access the whole machine without interactive approvals. "
         "Task scope and safety rules still bind it to this project. Ask in conversation to switch to "
         "project-only-auto or auto-review at any time."
+        if profiles["agent_permission_mode"] == "full-access" else
+        "Remote tasks retain permission mode " + profiles["agent_permission_mode"]
+        + ". Permissions have not been elevated; some operations may need desktop approval."
     )
     return {
         "ok": True,

@@ -61,6 +61,7 @@ class ModelDefaultTests(unittest.TestCase):
             {"agent_model": "", "agent_reasoning_effort": "ultra", "agent_service_tier": "fast"},
             {"agent_model": "", "agent_reasoning_effort": "", "agent_service_tier": ""},
             {"agent_model": "gpt-5.6-sol", "agent_reasoning_effort": "high", "agent_service_tier": "priority"},
+            {"agent_permission_mode": "auto-review"},
         ]
         for original in profiles:
             with self.subTest(profile=original), tempfile.TemporaryDirectory() as raw:
@@ -81,7 +82,9 @@ class ModelDefaultTests(unittest.TestCase):
                         "service_tier": "priority", "permission_mode": "full-access"}),
                     patch.dict(remote_gateway.os.environ, {"LOCALAPPDATA": raw}),
                 ):
-                    remote_gateway.init_project(args)
+                    result = remote_gateway.init_project(args)
+                    if original.get("agent_permission_mode") == "auto-review":
+                        self.assertIn("retain permission mode auto-review", result["permission_notice"])
                 actual = json.loads(target.read_text(encoding="utf-8"))["projects"]["test"]
                 self.assertEqual(actual["agent_model"], original.get("agent_model") or "gpt-6-astra")
                 for key in ("agent_reasoning_effort", "agent_service_tier"):

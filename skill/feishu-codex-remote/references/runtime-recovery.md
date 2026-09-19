@@ -15,31 +15,29 @@ scope or a project's domain rules.
 - Reuse existing queue and lifecycle-notice stores. Code and references use local
   Git history; runtime claims use short store transactions, not a task-long lock.
   Do not use Git merges to coordinate live queue writes or create a second ledger.
-- Change the existing owner and retire the superseded guidance in the same
-  revision. Keep historical explanations outside runtime prompts; do not append
-  repeated evidence excerpts on every turn. Use compact pointers and load only
-  the current operation's necessary evidence.
+- Change the existing owner and retire superseded rules in the same revision.
+  Inspect code, prompts, Skill references and tests together, including hidden
+  enforcement; conflict checks and real scenario regressions are release criteria.
+  Keep historical evidence outside routine prompts. Before generation, supply
+  the task's actual criteria and relevant current evidence, not a history dump.
+  On rejection, preserve exact failure reasons and completed side effects in the
+  handoff. Reuse verified work; do not invent success, repeat completed work, or
+  create a new retry budget merely because the error text changed.
+  Domain-specific review gates and model-routing budgets remain project-owned.
 
-## Native Capacity Errors
+## Native Capacity And Quota Errors
 
-`scripts/provider_failure.py` classifies the last terminal JSONL event after the
-native process exits. An intermediate `error` is not terminal; let Codex's native
-retry complete. A later `turn.completed` takes precedence. User/model text that
-mentions capacity is not provider evidence.
-
-For terminal capacity failure, persist the active run receipt and a
-`provider_failed` status plus one stable lifecycle notice per source message in
-the same store transaction. This status is not success and is not eligible for
-automatic model reruns. Delivery failure retries only the notice with the same
-UUID, including after restart. Clear Typing, never add CheckMark, release the
-main lane and archive a finished temporary child without touching its parent.
-Manual sync reports the terminal failure rather than claiming an empty queue
-means success. Ordinary unrelated failure policy stays unchanged.
-
-Do not add outer model retries, switch models, or attempt code repair for a
-provider-capacity outcome. If native retry succeeds, deliver the normal answer.
-When explaining increased latency, use actual event evidence; do not invent a
-retry count or duration. Native retry policy belongs to Codex, not this bridge.
+`scripts/provider_failure.py` classifies only the final native JSONL outcome.
+Intermediate errors allow Codex's native retry to finish; a later success wins.
+Terminal `at_capacity` and `rate_limit` return the exact work to Pending, clear
+Typing, retain its thread and attachments, and consume no ordinary failure attempt.
+The gateway adds no outer provider retries or model switching. A transient internal
+`provider_wait` prevents immediate busy-loop retries; normal startup/reconnect,
+manual or hourly reconciliation clears it even when no new messages are pulled.
+Send one stable, retryable unavailable notice, never a completion mark or resend
+request. Genuine execution failures keep their existing bounded recovery budget;
+this rule must not reset them indiscriminately. Pending branches stay resumable,
+not archived. Native retry latency must be explained from actual event evidence.
 
 ## Persistent Thread Writer Conflicts
 
@@ -113,9 +111,13 @@ an empty `thread/start` alone need not persist a source rollout, so it is not a
 sufficient import fixture. Full gateway fault routing remains covered separately
 by the deterministic tests above.
 
-For major live maintenance: use the existing pause lifecycle so arrivals remain
-durable and receive an upgrade notice, without model spinning. Finish the entire
-approved scope, all affected regressions, listener restoration and backlog
-reconciliation before calling the existing `maintenance notify-complete` action.
-A subcomponent passing is not whole-upgrade completion. Skill source updates
-alone do not authorize changing live hooks, schedules, models or worker state.
+For major live maintenance, retain arrivals as Pending with an upgrade notice;
+never complete them or require resending. `gateway_lifecycle.py` owns maintenance
+state, durable notices and temporary-thread cleanup. Ordinary feature maintenance
+ends after regression and exit/catch-up tests pass, then the existing Listener
+reconciles and resumes the backlog. When repairing those very pending requests,
+or when the user asks to process them during repair, include their completion in
+acceptance and use one exclusive processing owner; never race a second worker.
+Do not publish a completion notice until the whole approved scope is verified.
+Use the existing `maintenance exit` and `notify-complete` actions, not extra jobs.
+Skill source updates alone do not authorize changing live schedules or profiles.

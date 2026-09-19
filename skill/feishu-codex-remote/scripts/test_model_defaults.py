@@ -34,7 +34,7 @@ class ModelDefaultTests(unittest.TestCase):
                                 self.assertIn("model_reasoning_effort=" + json.dumps(effort), command)
                             if tier:
                                 self.assertIn("service_tier=" + json.dumps(tier), command)
-                            self.assertEqual("features.fast_mode=true" in command, tier == "fast")
+                            self.assertEqual("features.fast_mode=true" in command, tier in {"fast", "priority"})
                             self.assertEqual(project, original)
 
     def test_explicit_model_still_overrides_default(self):
@@ -76,15 +76,19 @@ class ModelDefaultTests(unittest.TestCase):
                     patch.object(remote_gateway, "CONFIG_PATH", target),
                     patch.object(remote_gateway, "load_config", return_value=config),
                     patch.object(remote_gateway, "load_json", return_value={}),
+                    patch.object(remote_gateway, "source_task_profile", return_value={
+                        "model": "gpt-6-astra", "reasoning_effort": "high",
+                        "service_tier": "priority", "permission_mode": "full-access"}),
                     patch.dict(remote_gateway.os.environ, {"LOCALAPPDATA": raw}),
                 ):
                     remote_gateway.init_project(args)
                 actual = json.loads(target.read_text(encoding="utf-8"))["projects"]["test"]
                 self.assertEqual(actual["agent_model"], original.get("agent_model") or "gpt-6-astra")
                 for key in ("agent_reasoning_effort", "agent_service_tier"):
-                    self.assertEqual(key in actual, key in original)
-                    if key in original:
-                        self.assertEqual(actual[key], original[key])
+                    self.assertEqual(actual[key], original.get(key) or {
+                        "agent_reasoning_effort": "high", "agent_service_tier": "priority"}[key])
+                self.assertEqual(actual["patrol_model"], "gpt-5.6-terra")
+                self.assertEqual(actual["patrol_service_tier"], "default")
 
     def test_profile_change_without_tier_argument_preserves_priority_switch(self):
         for tier in (None, "", "fast", "priority"):

@@ -12,6 +12,13 @@ import remote_gateway as gateway
 
 
 class InspectionModeTests(unittest.TestCase):
+    def setUp(self):
+        guard = patch.object(gateway, "source_task_profile", return_value={
+            "model": "gpt-6-astra", "reasoning_effort": "high",
+            "service_tier": "default", "permission_mode": "full-access"})
+        guard.start()
+        self.addCleanup(guard.stop)
+
     def test_new_registrations_and_reinitialization_preserve_modes(self):
         with tempfile.TemporaryDirectory() as raw:
             config = {"projects": {}}

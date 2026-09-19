@@ -28,17 +28,28 @@ class MaintenanceStopFailed(GatewayError):
 
 
 class LifecycleStore:
-    def fail_provider_capacity(self, message_ids, event_log, text):
+    def fail_provider_capacity(self, message_ids, event_log, text, kind="at_capacity"):
         with self.lock:
             rows = [self.state["messages"][mid] for mid in message_ids]
             if any(row.get("status") != "processing" or row.get("run_event_log") != str(event_log)
                    for row in rows):
                 raise GatewayError("Capacity result does not own the active run")
             for row in rows:
-                row.update(status="provider_failed", failed_at=timestamp(),
-                           error_kind="provider_capacity", error="Selected model is at capacity")
-                self._queue_lifecycle_notice("capacity:" + row["message_id"], text, row["message_id"])
+                row.update(status="pending", provider_wait=kind,
+                           attempts=max(0, int(row.get("attempts", 0)) - 1),
+                           error_kind=kind, error=text)
+                self._queue_lifecycle_notice("provider:" + kind + ":" + row["message_id"], text, row["message_id"])
             self.save()
+
+    def resume_provider_pending(self):
+        with self.lock:
+            changed = False
+            for row in self.state.get("messages", {}).values():
+                if row.get("status") == "pending" and row.get("provider_wait"):
+                    row.pop("provider_wait", None)
+                    changed = True
+            if changed:
+                self.save()
 
     def pause_requested(self, message_ids=()):
         with self.lock:
@@ -69,7 +80,9 @@ class LifecycleStore:
         generation = row.get("defer_requested") or mode.get("id")
         if not generation:
             raise GatewayError("No maintenance generation for deferred work")
-        row.update(status="deferred", defer_requested=generation, deferred_at=timestamp())
+        if row.get("status") == "processing":
+            row["attempts"] = max(0, int(row.get("attempts", 0)) - 1)
+        row.update(status="pending", defer_requested=generation, deferred_at=timestamp())
         self._queue_lifecycle_notice(
             "deferred:" + str(generation) + ":" + row["message_id"],
             mode["notice_text"], row["message_id"],
@@ -85,7 +98,7 @@ class LifecycleStore:
                         "notice_text": notice_text, "entered_at": timestamp()}
                 self.state["maintenance"] = mode
             for row in self.state.get("messages", {}).values():
-                if row.get("status") in {"pending", "failed"}:
+                if row.get("status") == "pending":
                     self._defer(row)
                 elif row.get("status") == "processing":
                     row["defer_requested"] = mode["id"]
@@ -106,9 +119,17 @@ class LifecycleStore:
                    for row in self.state.get("messages", {}).values()):
                 raise GatewayError("Active work is still stopping; maintenance remains enabled")
             mode = self.state.setdefault("maintenance", {})
+            for row in self.state.get("messages", {}).values():
+                if row.get("status") == "deferred" or (row.get("status") == "pending" and row.get("defer_requested")):
+                    row["status"] = "pending"
+                    row.pop("defer_requested", None)
+                    row.pop("maintenance_stop_error", None)
+            for key, notice in self.state.get("lifecycle_notices", {}).items():
+                if key.startswith("deferred:") and notice.get("status") == "pending":
+                    notice["status"] = "cancelled"
             if mode.get("active"):
                 mode.update(active=False, exited_at=timestamp())
-                self.save()
+            self.save()
             return dict(mode)
 
     def queue_completion(self, release_id, text):
@@ -199,18 +220,17 @@ class LifecycleWorker:
         english = str(self.project.get("language") or "").lower().startswith("en")
         if action == "enter":
             notice = (
-                "The system is upgrading. This request is retained and will not run automatically. "
-                "Please send it again after the repair-complete notice."
+                "The system is upgrading. Your request is retained and will resume automatically after maintenance."
                 if english else
-                "系统正在升级。这条请求已保留，暂不处理，也不会自动重跑；收到修复完成通知后请重新发起。"
+                "系统正在升级，消息已保留，维护结束后会自动继续处理，无需重发。"
             )
             result = self.store.enter_maintenance(request_id, reason, notice)
         elif action == "exit":
             result = self.store.exit_maintenance()
         elif action == "notify-complete":
             default = (
-                "The repair has been verified and service has resumed. You can resend deferred requests."
-                if english else "修复已验收，服务已恢复。之前暂缓的请求可以重新发起。"
+                "The repair has been verified and service has resumed. Retained requests will continue automatically."
+                if english else "修复已验收，服务已恢复，已保留的请求将自动继续处理，无需重发。"
             )
             result = self.store.queue_completion(release_id, text or default)
         else:
@@ -226,9 +246,11 @@ class LifecycleWorker:
         try:
             with self.store.lock:
                 pending = [(key, dict(row)) for key, row in self.store.state.get("lifecycle_notices", {}).items()
-                           if row.get("status") != "delivered" and row.get("retry_at", 0) <= time.time()]
+                           if row.get("status") == "pending" and row.get("retry_at", 0) <= time.time()]
             for key, notice in pending:
                 with self.store.lock:
+                    if self.store.state["lifecycle_notices"][key].get("status") != "pending":
+                        continue
                     if key.startswith("complete:") and self.store.pause_requested():
                         continue
                 try:
@@ -259,7 +281,7 @@ class LifecycleWorker:
                               if row.get("branch_thread_id") and row.get("branch_archive_state") != "archived"
                               and row.get("branch_archive_retry_at", 0) <= time.time()
                               and row["message_id"] not in self.active_branches
-                              and (row.get("status") in {"completed", "deferred", "provider_failed"}
+                              and (row.get("status") == "completed"
                                    or row.get("status") == "failed" and int(row.get("attempts", 0)) >= 3)]
             for row in candidates:
                 child = row["branch_thread_id"]

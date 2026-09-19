@@ -1344,7 +1344,9 @@ class ReconciliationTests(unittest.TestCase):
                     "registered_epoch": 1,
                     "hourly_catch_up_enabled": hourly_enabled,
                 }
-                self.store = SimpleNamespace(state={"cursor": 1})
+                self.store = SimpleNamespace(state={"cursor": 1}, resume_provider_pending=lambda: None)
+                self.signal = threading.Event()
+                self.branch_signal = threading.Event()
 
             def enqueue(self, _message):
                 return False
@@ -1389,7 +1391,8 @@ class ReconciliationTests(unittest.TestCase):
 
         worker = SimpleNamespace(
             project={"chat_id": "chat_1", "registered_epoch": 1},
-            store=SimpleNamespace(state={"cursor": 1}),
+            store=SimpleNamespace(state={"cursor": 1}, resume_provider_pending=lambda: None),
+            signal=threading.Event(), branch_signal=threading.Event(),
             enqueue=lambda _message: False,
         )
         service = object.__new__(remote_gateway.GatewayService)
@@ -1462,8 +1465,8 @@ class StoreTests(unittest.TestCase):
                 for item in second: store.finish(item["message_id"], "completed")
                 third = store.next_pending_batch(quiet_window_seconds=0)
         self.assertEqual([item["message_id"] for item in first], ["om_1", "om_2"])
-        self.assertEqual([item["message_id"] for item in second], ["om_3"])
-        self.assertEqual([item["message_id"] for item in third], ["om_4"])
+        self.assertEqual([item["message_id"] for item in second], ["om_3", "om_4"])
+        self.assertEqual(third, [])
 
     def test_merge_window_separates_old_topics(self):
         with tempfile.TemporaryDirectory() as raw:

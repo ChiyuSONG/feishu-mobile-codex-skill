@@ -60,13 +60,15 @@ class RuntimeRecoveryTests(unittest.TestCase):
         self.put(parallel.message("one", "first"), parallel.message("two", "second"))
         batch = self.store.next_pending_batch(quiet_window_seconds=0)
         self.put(parallel.message("next", "later"))
+        self.store.update_message("next", create_time=2000)
         with patch.object(gateway, "run_model_process", side_effect=self.native()) as model:
             self.worker._process_batch(batch)
         model.assert_called_once()
         for mid in ("one", "two"):
             row = self.store.state["messages"][mid]
-            self.assertEqual("provider_failed", row["status"])
-            self.assertEqual(1, row["attempts"])
+            self.assertEqual("pending", row["status"])
+            self.assertEqual("at_capacity", row["provider_wait"])
+            self.assertEqual(0, row["attempts"])
             self.assertTrue(row["content"])
             self.assertTrue(Path(row["run_event_log"]).exists())
             self.assertFalse(row.get("working_reaction_active"))
@@ -88,12 +90,14 @@ class RuntimeRecoveryTests(unittest.TestCase):
         self.worker.deliver_lifecycle_notices()
         self.assertEqual(4, self.client.reply_post.call_count)  # two failures, two successes
         self.assertTrue(all(row["status"] == "delivered" for row in notices.values()))
-        self.assertEqual(["next"], [row["message_id"] for row in self.store.next_pending_batch(quiet_window_seconds=0)])
+        self.assertEqual([], self.store.next_pending_batch(quiet_window_seconds=0))
         service = gateway.GatewayService.__new__(gateway.GatewayService)
         service.workers = {"test": self.worker}
         snapshot = service.queue_snapshot(["test"])
-        self.assertEqual(2, len(snapshot["terminal_failures"]))
-        self.assertEqual(["next"], [row["message_id"] for row in snapshot["active"]])
+        self.assertEqual([], snapshot["terminal_failures"])
+        self.assertEqual({"next", "one", "two"}, {row["message_id"] for row in snapshot["active"]})
+        self.store.resume_provider_pending()
+        self.assertEqual({"next", "one", "two"}, {row["message_id"] for row in self.store.next_pending_batch(quiet_window_seconds=0)})
 
     def test_capacity_branch_finishes_without_retry_or_parent_archive(self):
         self.put(parallel.message("main", "ordinary", status="processing"), parallel.message("side"))
@@ -105,11 +109,11 @@ class RuntimeRecoveryTests(unittest.TestCase):
         create.assert_called_once()
         model.assert_called_once()
         self.assertEqual("processing", self.store.state["messages"]["main"]["status"])
-        self.assertEqual("provider_failed", self.store.state["messages"]["side"]["status"])
+        self.assertEqual("pending", self.store.state["messages"]["side"]["status"])
         self.assertEqual("main-A", self.store.thread_id())
         with patch.object(gateway, "archive_thread") as archive:
             self.worker.reconcile_branch_archives()
-        self.assertEqual("child", archive.call_args.args[0])
+        archive.assert_not_called()
 
     def test_capacity_cannot_overwrite_newer_or_foreign_run(self):
         row = parallel.message("one", "ordinary", status="processing")

@@ -38,7 +38,7 @@ It automates setup wherever practical, but it is not a fully managed service. Di
 
 **Model and permission settings**
 
-For installation, we recommend **GPT-6 Astra** and **strongly recommend enabling Full Access**; newly connected projects also default to these settings. Choose reasoning effort and Fast mode as needed; remote tasks inherit your local configuration. Existing explicit model, reasoning, and speed settings are preserved, and each project can be adjusted separately through chat instructions.
+For installation, we recommend **GPT-6 Astra** and **strongly recommend enabling Full Access**. Choose reasoning effort and Fast mode as needed; remote tasks inherit the current task configuration when first connected and can then be adjusted through chat. Existing explicit model, reasoning, and speed settings are preserved, and each project can be adjusted separately through chat instructions.
 
 > **Full Access warning — applies to both installation and remote use: it permits reading and writing local files and running commands; mistakes or malicious instructions may affect data outside the project. Use it only on a computer and project you trust. You can switch to project-only access or per-action review through chat instructions, but some operations may then require returning to the computer. Full Access remains strongly recommended for smooth remote work.**
 
@@ -77,7 +77,7 @@ Send messages just as you normally talk to Codex:
 - `# Based on the requirements we just discussed, prepare a separate acceptance checklist without waiting for the code changes to finish.`
 - `* Remind me every Friday at 5 PM to submit my weekly report, and keep reminding me until I say it is submitted.`
 
-You can send messages continuously in the same Feishu group. Codex uses the context to identify follow-up details for the same task and combine them for processing, while different tasks are queued and processed sequentially. Start a message with `*` to force separate processing without automatically merging it with other messages, or `#` to start an independent context inherited from the current conversation and begin processing in parallel immediately. Automatic inspection checks connection and task status hourly by default. Tasks do not run while the computer or Codex is closed, but messages stored in Feishu are not lost; processing resumes automatically when Codex opens again.
+You can send messages continuously in the same Feishu group. Codex uses the context to identify follow-up details for the same task and combine them for processing, while different tasks are queued and processed sequentially. Start a message with `*` to handle a new task separately without automatically merging it with preceding messages, or `#` to start an independent context inherited from the current conversation and begin processing in parallel immediately. Automatic inspection checks connection and task status hourly by default. Tasks do not run while the computer or Codex is closed, but messages stored in Feishu are not lost; processing resumes automatically when Codex opens again.
 
 ## Frequently asked questions
 

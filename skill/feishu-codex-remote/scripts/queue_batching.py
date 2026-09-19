@@ -2,8 +2,9 @@
 from datetime import datetime
 import json
 import time
+from gateway_common import message_text, resource_keys
 
-QUIET_WINDOW_SECONDS = 15.0
+QUIET_WINDOW_SECONDS = 60.0
 
 def route_key(item):
     sender = item.get("sender") or {}
@@ -35,17 +36,22 @@ def select_pending(items, forced_single, routing_mode, *, now=None,
         failed.sort(key=lambda item: (int(item.get("create_time") or 0), item["message_id"]))
         return failed[:1], None
     first = pending[0]
-    if forced_single(first):
+    if first.get("provider_wait"):
+        return [], None
+    # An empty separator is a control marker, not a new model task.
+    if message_text(first.get('content')).strip() == '*' and not resource_keys(first.get('content')):
         return [first], 0.0
     # Wait on the whole unstarted same-sender prefix, not the eventual reply
     # routing subdivision. A star ends the prefix's quiet wait immediately.
     prefix = [first]
     star_barrier = False
     for item in pending[1:]:
-        if forced_single(item):
-            star_barrier = True
+        if item.get("provider_wait"):
             break
         if route_key(item) != route_key(first):
+            break
+        if forced_single(item):
+            star_barrier = True
             break
         prefix.append(item)
     delay = 0.0 if star_barrier else max(

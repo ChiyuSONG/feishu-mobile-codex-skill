@@ -56,13 +56,13 @@ class LifecycleTests(unittest.TestCase):
         original = self.enqueue()
         self.enter()
         row = self.store.state["messages"]["one"]
-        self.assertEqual("deferred", row["status"])
+        self.assertEqual("pending", row["status"])
         self.assertEqual(original["content"], row["content"])
         self.assertEqual(0, row["attempts"])
         self.assertEqual([], self.store.next_pending_batch(quiet_window_seconds=0))
         self.worker.deliver_lifecycle_notices()
         self.client.reply_post.assert_called_once()
-        self.assertEqual("deferred", row["status"])
+        self.assertEqual("pending", row["status"])
         self.assertNotIn("completed_at", row)
         self.assertFalse(self.client.add_reaction.called)
 
@@ -72,7 +72,7 @@ class LifecycleTests(unittest.TestCase):
         self.worker.enqueue(original)
         self.assertEqual(1, len(self.store.state["messages"]))
         self.assertEqual([], self.worker.dispatch_parallel())
-        self.assertEqual("deferred", self.store.state["messages"]["one"]["status"])
+        self.assertEqual("pending", self.store.state["messages"]["one"]["status"])
         self.worker.deliver_lifecycle_notices()
         self.worker.deliver_lifecycle_notices()
         self.client.reply_post.assert_called_once()
@@ -84,24 +84,24 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(first, self.store.state["maintenance"])
         self.assertEqual(1, len(self.store.state["lifecycle_notices"]))
 
-    def test_restart_does_not_replay_deferred_messages(self):
+    def test_restart_keeps_pending_until_exit(self):
         self.enqueue()
         self.enter()
         restarted = gateway.ProjectWorker("test", self.project, self.client, self.root / "log")
         self.assertTrue(restarted.store.pause_requested())
-        self.assertEqual("deferred", restarted.store.state["messages"]["one"]["status"])
+        self.assertEqual("pending", restarted.store.state["messages"]["one"]["status"])
         restarted.maintenance_action("exit", "exit")
-        self.assertEqual([], restarted.store.next_pending_batch(quiet_window_seconds=0))
+        self.assertEqual(["one"], [row["message_id"] for row in restarted.store.next_pending_batch(quiet_window_seconds=0)])
         self.assertFalse(restarted.store.pause_requested())
 
-    def test_exit_resumes_new_messages_only(self):
+    def test_exit_resumes_retained_and_new_messages(self):
         self.enqueue()
         self.enter()
         self.worker.maintenance_action("exit", "exit")
         self.enqueue("new")
         selected = self.store.next_pending_batch(quiet_window_seconds=0)
-        self.assertEqual(["new"], [row["message_id"] for row in selected])
-        self.assertEqual("deferred", self.store.state["messages"]["one"]["status"])
+        self.assertEqual(["new", "one"], [row["message_id"] for row in selected])
+        self.assertEqual("processing", self.store.state["messages"]["one"]["status"])
 
     def test_active_work_must_confirm_stopping_before_exit(self):
         self.enqueue()
@@ -112,7 +112,7 @@ class LifecycleTests(unittest.TestCase):
         with patch.object(gateway, "run_codex") as run:
             self.worker._process_batch(batch)
         run.assert_not_called()
-        self.assertEqual("deferred", self.store.state["messages"]["one"]["status"])
+        self.assertEqual("pending", self.store.state["messages"]["one"]["status"])
         self.store.exit_maintenance()
 
     def test_stop_failure_is_not_falsely_marked_deferred(self):

@@ -1,5 +1,6 @@
 """Synthetic lifecycle regression; never uses a real app, Codex, or user history."""
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -46,6 +47,17 @@ class LifecycleTests(unittest.TestCase):
 
     def enter(self, request="upgrade"):
         return self.worker.maintenance_action("enter", request, reason="test repair")
+
+    def acceptance(self, release="release"):
+        artifact = self.root / "acceptance-test.txt"
+        artifact.write_text("synthetic passing checks", encoding="utf-8")
+        path = self.root / (release + "-acceptance.json")
+        path.write_text(json.dumps({"release_id": release, "scope": "fixture repair",
+            "maintenance_id": self.store.state.get("maintenance", {}).get("id"),
+            "remaining_work": [], "conflicts": [], "catch_up_verified": True,
+            "checks": [{"passed": True, "artifact": artifact.name,
+                        "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest()}]}), encoding="utf-8")
+        return str(path)
 
     def child(self, status="completed", attempts=1, child="child"):
         self.enqueue(text="# branch")
@@ -134,19 +146,19 @@ class LifecycleTests(unittest.TestCase):
         with self.assertRaises(gateway.GatewayError):
             self.worker.maintenance_action("notify-complete", "req", release_id="release")
         self.store.exit_maintenance()
-        self.worker.maintenance_action("notify-complete", "req", release_id="release")
+        self.worker.maintenance_action("notify-complete", "req", release_id="release", acceptance_file=self.acceptance())
         self.worker.deliver_lifecycle_notices()
-        self.worker.maintenance_action("notify-complete", "again", release_id="release")
+        self.worker.maintenance_action("notify-complete", "again", release_id="release", acceptance_file=self.acceptance())
         self.worker.deliver_lifecycle_notices()
         self.client.send_post.assert_called_once()
         with self.assertRaises(gateway.GatewayError):
-            self.worker.maintenance_action("notify-complete", "changed", release_id="release", text="changed")
-        self.worker.maintenance_action("notify-complete", "next", release_id="next")
+            self.worker.maintenance_action("notify-complete", "changed", release_id="release", text="changed", acceptance_file=self.acceptance())
+        self.worker.maintenance_action("notify-complete", "next", release_id="next", acceptance_file=self.acceptance("next"))
         self.worker.deliver_lifecycle_notices()
         self.assertEqual(2, self.client.send_post.call_count)
 
     def test_failed_send_recovers_using_same_uuid_after_restart(self):
-        self.worker.maintenance_action("notify-complete", "req", release_id="release")
+        self.worker.maintenance_action("notify-complete", "req", release_id="release", acceptance_file=self.acceptance())
         self.client.send_post.side_effect = RuntimeError("offline")
         self.worker.deliver_lifecycle_notices()
         old_uuid = self.client.send_post.call_args.args[2]
@@ -158,13 +170,13 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual("delivered", restarted.store.state["lifecycle_notices"]["complete:release"]["status"])
 
     def test_new_maintenance_blocks_pending_completion_notification(self):
-        self.worker.maintenance_action("notify-complete", "req", release_id="release")
+        self.worker.maintenance_action("notify-complete", "req", release_id="release", acceptance_file=self.acceptance())
         self.enter()
         self.worker.deliver_lifecycle_notices()
         self.client.send_post.assert_not_called()
 
     def test_notice_delivery_does_not_hold_message_store_lock(self):
-        self.worker.maintenance_action("notify-complete", "req", release_id="release")
+        self.worker.maintenance_action("notify-complete", "req", release_id="release", acceptance_file=self.acceptance())
         def send(*args):
             done = threading.Event()
             writer = threading.Thread(target=lambda: (self.enqueue("concurrent"), done.set()))
@@ -302,6 +314,7 @@ class LifecycleTests(unittest.TestCase):
         response_dir = self.root / "responses"
         gateway.atomic_write_json(request_dir / "notice.json", {
             "project_keys": ["test"], "maintenance_action": "notify-complete", "release_id": "release",
+            "acceptance_file": self.acceptance(),
         })
         service = gateway.GatewayService.__new__(gateway.GatewayService)
         service.workers = {"test": self.worker}

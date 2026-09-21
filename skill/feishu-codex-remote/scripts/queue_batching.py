@@ -20,6 +20,18 @@ def received_epoch(item):
             pass
     return int(item.get("create_time") or 0) / 1000.0
 
+def prepared_batch(first, items):
+    receipt = first.get("prepared_reply")
+    if not receipt:
+        return None
+    by_id = {item["message_id"]: item for item in items}
+    rows = [by_id.get(mid) for mid in receipt.get("message_ids", [])]
+    if not rows or any(not row or row.get("status") not in {"pending", "failed"}
+                       or int(row.get("attempts") or 0) >= 3
+                       or row.get("provider_wait") or row.get("prepared_reply") != receipt for row in rows):
+        return []
+    return rows
+
 def select_pending(items, forced_single, routing_mode, *, now=None,
                    quiet_seconds=QUIET_WINDOW_SECONDS, max_messages=None,
                    merge_window_seconds=None, parallel=None):
@@ -34,10 +46,17 @@ def select_pending(items, forced_single, routing_mode, *, now=None,
         failed = [item for item in items if item.get("status") == "failed"
                   and int(item.get("attempts") or 0) < 3]
         failed.sort(key=lambda item: (int(item.get("create_time") or 0), item["message_id"]))
+        if failed:
+            saved = prepared_batch(failed[0], items)
+            if saved is not None:
+                return saved, None
         return failed[:1], None
     first = pending[0]
     if first.get("provider_wait"):
         return [], None
+    saved = prepared_batch(first, items)
+    if saved is not None:
+        return saved, None
     # An empty separator is a control marker, not a new model task.
     if message_text(first.get('content')).strip() == '*' and not resource_keys(first.get('content')):
         return [first], 0.0
@@ -46,6 +65,8 @@ def select_pending(items, forced_single, routing_mode, *, now=None,
     prefix = [first]
     star_barrier = False
     for item in pending[1:]:
+        if item.get("prepared_reply"):
+            break
         if item.get("provider_wait"):
             break
         if route_key(item) != route_key(first):

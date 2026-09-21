@@ -1,4 +1,7 @@
 from __future__ import annotations
+from task_contract import (EXECUTION_CONTRACT, IncompleteTask, failure_text,
+                           outcome_path, prepared_result, read_outcome, restore_result,
+                           extract_transport_outcome)
 
 from queue_batching import QUIET_WINDOW_SECONDS, select_pending
 from codex_thread_fork import archive_thread, fork_thread, start_thread
@@ -650,6 +653,8 @@ class ProjectStore(LifecycleStore):
     def finish(self, message_id: str, status: str, **fields: Any) -> None:
         with self.lock:
             item = self.state["messages"][message_id]
+            if item.get("status") == "completed" and status != "completed":
+                return
             item.update(fields)
             item["status"] = status
             item["updated_at"] = now_iso()
@@ -661,6 +666,18 @@ class ProjectStore(LifecycleStore):
             item.update(fields)
             item["updated_at"] = now_iso()
             self.save()
+
+    def complete_batch(self, message_ids: list[str], **fields: Any) -> None:
+        with self.lock:
+            rows = self.state["messages"]
+            previous = {mid: dict(rows[mid]) for mid in message_ids}
+            try:
+                for mid in message_ids:
+                    rows[mid].update(fields, status="completed", updated_at=now_iso())
+                self.save()
+            except Exception:
+                rows.update(previous)
+                raise
 
     def record_run(self, message_ids: list[str], event_log: Path) -> None:
         with self.lock:
@@ -755,7 +772,7 @@ def combined_batch_item(items: list[dict[str, Any]]) -> dict[str, Any]:
     item["content"] = json.dumps({"text": combined}, ensure_ascii=False)
     item["batch_message_ids"] = [entry["message_id"] for entry in items]
     item["recovery_records"] = [{key: entry[key] for key in
-        ("message_id", "error", "error_kind", "run_event_log") if entry.get(key)}
+        ("message_id", "error", "error_kind", "run_event_log", "task_outcome", "last_final_path") if entry.get(key)}
         for entry in items if entry.get("error") or entry.get("run_event_log")]
     return item
 
@@ -811,7 +828,7 @@ def build_prompt(
         text = text[7:].lstrip()
     attachment_lines = "\n".join(f"- {path}" for path in attachments) or "- 无"
     recovery_context = json.dumps({key: item[key] for key in
-        ("error", "error_kind", "run_event_log", "batch_message_ids", "recovery_records") if item.get(key)}, ensure_ascii=False)
+        ("error", "error_kind", "run_event_log", "batch_message_ids", "recovery_records", "task_outcome", "last_final_path") if item.get(key)}, ensure_ascii=False)
     workspace_mode = project_workspace_mode(project)
     workspace_label = "General 日常问答" if workspace_mode == "general" else "本地项目"
     permission_mode = project_permission_mode(project)
@@ -964,6 +981,7 @@ def run_codex(project_key: str, project: dict[str, Any], store: ProjectStore, it
         attachments,
         first_turn=not bool(thread_id),
     )
+    prompt += "\n" + EXECUTION_CONTRACT + "\nOutcome path: " + str(outcome_path(final_path))
     if item.get("branch_thread_id"):
         prompt = (
             "本轮是井号触发的一次性旁支，只处理本条消息。继承主线快照但不改变主线归属；"
@@ -994,6 +1012,7 @@ def run_codex(project_key: str, project: dict[str, Any], store: ProjectStore, it
     if not new_thread_id:
         raise GatewayError(f"Codex returned no persistent thread ID; log={event_log}")
     answer = final_path.read_text(encoding="utf-8").strip()
+    answer = extract_transport_outcome(answer, final_path)
     if not answer:
         raise GatewayError("Codex returned an empty final answer")
     return answer, new_thread_id, final_path
@@ -1591,6 +1610,9 @@ def reply_complete(
 
 
 class ProjectWorker(LifecycleWorker):
+    def lifecycle_notice_parts(self, text):
+        return chunks(text)
+
     def __init__(self, key: str, project: dict[str, Any], client: FeishuClient, log_path: Path) -> None:
         self.key = key
         self.project = project
@@ -1912,6 +1934,8 @@ class ProjectWorker(LifecycleWorker):
         message_ids = [str(item["message_id"]) for item in items]
         reply_item = combined_batch_item(items)
         working_reactions: dict[str, str] = {}
+        phase = "attachments"
+        outcome = None
         try:
             if self.store.pause_requested(message_ids):
                 raise MaintenancePaused("System upgrade; original request retained")
@@ -1928,7 +1952,11 @@ class ProjectWorker(LifecycleWorker):
                 except Exception as exc:
                     working_reactions[message_id] = ""
                     append_log(self.log_path, f"ack reaction failed for {message_id}: {exc}")
-            if len(items) == 1:
+            phase = "execution"
+            receipt = self.store.state["messages"][message_ids[0]].get("prepared_reply")
+            if receipt:
+                answer, thread_id, final_path = restore_result(receipt, message_ids)
+            elif len(items) == 1:
                 answer, thread_id, final_path = run_codex(
                     self.key, self.project, self.store, reply_item, attachments
                 )
@@ -1940,8 +1968,20 @@ class ProjectWorker(LifecycleWorker):
                 self.store.update_message(items[0]["message_id"], branch_thread_id=thread_id)
             else:
                 self.store.set_thread_id(thread_id)
+            phase = "review"
+            outcome = read_outcome(final_path)
+            for message_id in message_ids:
+                self.store.update_message(message_id, task_outcome=outcome, last_final_path=str(final_path))
+            if outcome and outcome.get("status") == "incomplete":
+                raise IncompleteTask("Requested work remains incomplete; see retained outcome")
+            receipt = prepared_result(answer, thread_id, final_path, message_ids)
+            with self.store.lock:
+                for message_id in message_ids:
+                    self.store.state["messages"][message_id]["prepared_reply"] = receipt
+                self.store.save()
             if self.store.pause_requested(message_ids):
                 raise MaintenancePaused("System upgrade; completed output retained")
+            phase = "delivery"
             document_link = reply_complete(
                 self.client,
                 self.project,
@@ -1950,23 +1990,21 @@ class ProjectWorker(LifecycleWorker):
                 final_path,
                 self.log_path,
             )
+            phase = "completion"
             answer_sha256 = hashlib.sha256(answer.encode("utf-8")).hexdigest()
             completed_at = now_iso()
+            self.store.complete_batch(
+                message_ids, completed_at=completed_at, answer_sha256=answer_sha256,
+                document_link=document_link, batch_message_ids=message_ids,
+                reply_source_message_id=reply_item["message_id"])
             for item in items:
                 message_id = str(item["message_id"])
-                reaction_error = self._replace_working_with_completion(
-                    message_id, working_reactions.get(message_id, "")
-                )
-                self.store.finish(
-                    message_id,
-                    "completed",
-                    completed_at=completed_at,
-                    answer_sha256=answer_sha256,
-                    document_link=document_link,
-                    batch_message_ids=message_ids,
-                    reply_source_message_id=reply_item["message_id"],
-                    reaction_sync_error=reaction_error,
-                )
+                try:
+                    reaction_error = self._replace_working_with_completion(
+                        message_id, working_reactions.get(message_id, ""))
+                    self.store.update_message(message_id, reaction_sync_error=reaction_error)
+                except Exception as reaction_exc:
+                    self.store.update_message(message_id, reaction_sync_error=str(reaction_exc))
             append_log(
                 self.log_path,
                 f"completed {self.key}:{','.join(message_ids)}; thread={thread_id}",
@@ -2004,8 +2042,11 @@ class ProjectWorker(LifecycleWorker):
             trace = traceback.format_exc()
             append_log(self.log_path, f"failed {self.key}:{','.join(message_ids)}: {trace}")
             failed_at = now_iso()
+            terminal = False
             for item in items:
                 message_id = str(item["message_id"])
+                if self.store.state["messages"][message_id].get("status") == "completed":
+                    continue
                 attempts = int(self.store.state["messages"][message_id].get("attempts") or 0)
                 reaction_error = self._clear_working_reaction(
                     message_id, working_reactions.get(message_id, "")
@@ -2019,14 +2060,14 @@ class ProjectWorker(LifecycleWorker):
                     reaction_sync_error=reaction_error,
                 )
                 if attempts >= 3:
-                    try:
-                        self.client.reply_post(
-                            message_id,
-                            "这条消息已保留，但连续处理失败三次。我已经停止自动重试，需要检查本地网关日志。",
-                            "codex-remote-failed-" + hashlib.sha256(message_id.encode()).hexdigest()[:32],
-                        )
-                    except Exception:
-                        append_log(self.log_path, "failed to report terminal failure")
+                    terminal = True
+            if terminal:
+                text = failure_text(phase, self.project.get("language") == "en", outcome)
+                key = "task-failed:" + hashlib.sha256("\0".join(message_ids).encode()).hexdigest()
+                with self.store.lock:
+                    if key not in self.store.state.get("lifecycle_notices", {}):
+                        self.store._queue_lifecycle_notice(key, text, reply_item["message_id"])
+                        self.store.save()
         finally:
             self.lifecycle_signal.set()
 
@@ -2149,6 +2190,7 @@ class GatewayService:
                             request["maintenance_action"], request_id,
                             reason=request.get("reason", ""), release_id=request.get("release_id", ""),
                             text=request.get("text", ""),
+                            acceptance_file=request.get("acceptance_file"),
                         )
                         if request["maintenance_action"] == "notify-complete":
                             worker.deliver_lifecycle_notices()
@@ -2986,6 +3028,7 @@ def request_maintenance(args: argparse.Namespace) -> dict[str, Any]:
         "request_id": request_id, "project_keys": keys, "requested_at": now_iso(),
         "maintenance_action": args.action, "reason": args.reason or "",
         "release_id": args.release_id or "", "text": text,
+        "acceptance_file": str(Path(args.acceptance_file).resolve()) if getattr(args, "acceptance_file", None) else None,
     })
     deadline = time.monotonic() + args.ack_timeout
     while time.monotonic() < deadline and not response_path.exists():
@@ -3018,6 +3061,7 @@ def parser() -> argparse.ArgumentParser:
     maintenance.add_argument("--reason")
     maintenance.add_argument("--release-id")
     maintenance.add_argument("--text-file")
+    maintenance.add_argument("--acceptance-file")
     maintenance.add_argument("--ack-timeout", type=float, default=30)
     initialize = commands.add_parser("init-project")
     initialize.add_argument("--project-key", required=True)

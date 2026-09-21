@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from datetime import datetime
 import hashlib
+import json
+from pathlib import Path
 import os
 import signal
 import subprocess
@@ -28,6 +30,31 @@ class MaintenanceStopFailed(GatewayError):
 
 
 class LifecycleStore:
+    def verify_acceptance(self, release_id, acceptance_file):
+        if not acceptance_file:
+            raise GatewayError("Completion requires an acceptance evidence file")
+        path = Path(acceptance_file).resolve()
+        try:
+            evidence = json.loads(path.read_text(encoding="utf-8"))
+            if (evidence.get("release_id") != release_id or not evidence.get("scope")
+                    or evidence.get("remaining_work") != [] or evidence.get("conflicts") != []
+                    or evidence.get("catch_up_verified") is not True or not evidence.get("checks")):
+                raise ValueError("Incomplete acceptance")
+            for check in evidence["checks"]:
+                artifact = (path.parent / check["artifact"]).resolve()
+                if check.get("passed") is not True or hashlib.sha256(artifact.read_bytes()).hexdigest() != check["sha256"]:
+                    raise ValueError("Changed or failed evidence")
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise GatewayError("Acceptance evidence is missing, changed, or not passing") from exc
+        with self.lock:
+            if evidence.get("maintenance_id") != self.state.get("maintenance", {}).get("id"):
+                raise GatewayError("Acceptance belongs to a different maintenance generation")
+            for mid in evidence.get("required_message_ids", []):
+                if self.state.get("messages", {}).get(mid, {}).get("status") != "completed":
+                    raise GatewayError("A request required for this repair is not complete")
+            return {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                    "maintenance_id": evidence.get("maintenance_id")}
+
     def fail_provider_capacity(self, message_ids, event_log, text, kind="at_capacity"):
         with self.lock:
             rows = [self.state["messages"][mid] for mid in message_ids]
@@ -97,6 +124,9 @@ class LifecycleStore:
                 mode = {"active": True, "id": request_id, "reason": reason,
                         "notice_text": notice_text, "entered_at": timestamp()}
                 self.state["maintenance"] = mode
+                for key, notice in self.state.get("lifecycle_notices", {}).items():
+                    if key.startswith("complete:") and notice.get("status") == "pending":
+                        notice["status"] = "cancelled"
             for row in self.state.get("messages", {}).values():
                 if row.get("status") == "pending":
                     self._defer(row)
@@ -132,13 +162,17 @@ class LifecycleStore:
             self.save()
             return dict(mode)
 
-    def queue_completion(self, release_id, text):
+    def queue_completion(self, release_id, text, acceptance_file=None):
         if not release_id.strip() or not text.strip():
             raise GatewayError("Release identity and completion text are required")
+        evidence = self.verify_acceptance(release_id, acceptance_file)
         with self.lock:
             if self.pause_requested():
                 raise GatewayError("Exit maintenance and verify recovery before notifying completion")
+            if evidence["maintenance_id"] != self.state.get("maintenance", {}).get("id"):
+                raise GatewayError("Maintenance changed during acceptance verification")
             notice = self._queue_lifecycle_notice("complete:" + release_id, text)
+            notice["acceptance"] = evidence
             self.save()
             return dict(notice)
 
@@ -216,7 +250,7 @@ class LifecycleWorker:
         self.lifecycle_signal.set()
         return self.lifecycle_thread
 
-    def maintenance_action(self, action, request_id, reason="", release_id="", text=""):
+    def maintenance_action(self, action, request_id, reason="", release_id="", text="", acceptance_file=None):
         english = str(self.project.get("language") or "").lower().startswith("en")
         if action == "enter":
             notice = (
@@ -232,7 +266,7 @@ class LifecycleWorker:
                 "The repair has been verified and service has resumed. Retained requests will continue automatically."
                 if english else "修复已验收，服务已恢复，已保留的请求将自动继续处理，无需重发。"
             )
-            result = self.store.queue_completion(release_id, text or default)
+            result = self.store.queue_completion(release_id, text or default, acceptance_file)
         else:
             raise GatewayError("Unknown maintenance action")
         self.signal.set()
@@ -254,14 +288,32 @@ class LifecycleWorker:
                     if key.startswith("complete:") and self.store.pause_requested():
                         continue
                 try:
-                    if notice.get("message_id"):
-                        result = self.client.reply_post(notice["message_id"], notice["text"], notice["uuid"])
-                    else:
-                        result = self.client.send_post(self.project["chat_id"], notice["text"], notice["uuid"])
+                    parts = self.lifecycle_notice_parts(notice["text"])
+                    for index, part in enumerate(parts):
+                        with self.store.lock:
+                            current = self.store.state["lifecycle_notices"][key]
+                            if current.get("status") != "pending":
+                                raise GatewayError("Notification superseded while delivering")
+                            saved = current.get("delivered_parts", {}).get(str(index))
+                        if saved:
+                            continue
+                        send_uuid = notice["uuid"] if index == 0 else notice["uuid"] + "-" + str(index)
+                        if notice.get("message_id"):
+                            result = self.client.reply_post(notice["message_id"], part, send_uuid)
+                        else:
+                            result = self.client.send_post(self.project["chat_id"], part, send_uuid)
+                        if not isinstance(result, dict) or not (result.get("data") or {}).get("message_id"):
+                            raise GatewayError("Notification delivery has no remote message receipt")
+                        with self.store.lock:
+                            row = self.store.state["lifecycle_notices"][key]
+                            row.setdefault("delivered_parts", {})[str(index)] = result["data"]["message_id"]
+                            self.store.save()
                     with self.store.lock:
                         row = self.store.state["lifecycle_notices"][key]
+                        if row.get("status") != "pending":
+                            continue
                         row.update(status="delivered", delivered_at=timestamp(), error=None,
-                                   remote_message_id=(result or {}).get("data", {}).get("message_id"))
+                                   remote_message_id=row["delivered_parts"]["0"])
                         self.store.save()
                 except Exception as exc:
                     with self.store.lock:

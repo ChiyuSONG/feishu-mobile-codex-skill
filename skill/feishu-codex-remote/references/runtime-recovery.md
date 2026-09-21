@@ -25,6 +25,35 @@ scope or a project's domain rules.
   create a new retry budget merely because the error text changed.
   Domain-specific review gates and model-routing budgets remain project-owned.
 
+## Execution And Recovery Contract
+
+`scripts/task_contract.py` owns the shared generation/recovery instructions and
+result receipt format. `run_codex` loads this contract for every run; project
+prompts reference it rather than maintaining competing copies. Applicable domain
+criteria remain project-owned; do not install another reviewer or nutrition rules.
+For existing project reviewers, forward criteria, evidence and prior findings
+together. Distinguish objective invariants from flexible semantic judgments.
+
+Codex plans compound work inside its turn. The gateway preserves source order,
+not a new intent classifier or separate model call per subtask. A partial result
+uses the supplied per-run `outcome.json`: completed, failed, dependency-blocked
+work, evidence, readable cause and next step. Recovery receives the prior result;
+incomplete tasks retain the existing attempt budget and get no completion mark.
+Fully completed replies need no extra receipt or review call. This is an execution
+report, not independent proof: the Agent must verify effects with project tools.
+Restricted agents can use the transport fallback defined in `task_contract.py`;
+the gateway removes its control block before delivery. Do not broaden permissions
+just to save an outcome receipt.
+
+Before network delivery, the store saves the output, source batch and hash.
+Delivery-only recovery reuses the output without another model turn; new messages
+cannot merge into that prepared reply. Completion is committed for the whole batch
+before best-effort reaction updates; late failures cannot downgrade it. Terminal
+failure notices use the durable lifecycle outbox and the last source-message anchor.
+The user sees the failed phase, known completed/unfinished/blocked portions and
+next step. Say when the detailed cause is unknown instead of inventing one.
+Optional safe drafts are labeled unapproved; raw exceptions stay local.
+
 ## Native Capacity And Quota Errors
 
 `scripts/provider_failure.py` classifies only the final native JSONL outcome.
@@ -98,6 +127,7 @@ python -m unittest discover -s scripts -p "test_*.py"
 | Ordinary/hash overlap, duplicate claims, bootstrap, reload | `test_parallel_hash.py` |
 | Quiet window, star barriers, retained source IDs | `test_queue_batching.py` |
 | Maintenance arrival/stop/restart/notice retry; temporary cleanup | `test_gateway_lifecycle.py` |
+| Partial result, prepared reply replay, late failure, acceptance evidence and notification receipts | `test_task_contract.py` |
 | Delivery, attachments, scope, context bridge and existing policies | `test_remote_gateway.py` and edition-specific tests |
 
 Use isolated temporary fixtures. Distinguish simulated model/Feishu tests from
@@ -120,4 +150,18 @@ or when the user asks to process them during repair, include their completion in
 acceptance and use one exclusive processing owner; never race a second worker.
 Do not publish a completion notice until the whole approved scope is verified.
 Use the existing `maintenance exit` and `notify-complete` actions, not extra jobs.
+After running the applicable regression and exit/catch-up tests, record their
+evidence in a local acceptance JSON. Pass it to `notify-complete` using
+`--acceptance-file <path>`. Required fields are `release_id`, `maintenance_id`
+(the current maintenance ID, or null if no maintenance was needed), `scope`,
+empty `remaining_work` and `conflicts`, `catch_up_verified: true`, and `checks`.
+Each check contains `passed: true`, an `artifact` path relative to this JSON and
+that file's `sha256`. Include changed-source fingerprints and test logs, not just
+a prose assertion. `required_message_ids` is optional: list only messages that
+the repair explicitly must complete, never unrelated new arrivals. The Listener
+checks artifact integrity, generation and required message completion before
+queuing the notification. This validates evidence integrity, not the truth of
+arbitrary test claims; the maintainer remains responsible for meaningful tests.
+New maintenance cancels an unsent obsolete completion notice. Exit still uses
+the existing catch-up/worker wake-up path, without another worker or scheduled job.
 Skill source updates alone do not authorize changing live schedules or profiles.

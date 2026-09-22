@@ -29,7 +29,8 @@ def runtime_python(system: str | None = None) -> Path:
 
 
 def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
+    options = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+    return subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False, **options)
 
 
 def install_windows() -> dict[str, Any]:

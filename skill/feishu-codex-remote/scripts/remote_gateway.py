@@ -1,13 +1,15 @@
 from __future__ import annotations
 from task_contract import (EXECUTION_CONTRACT, IncompleteTask, failure_text,
                            outcome_path, prepared_result, read_outcome, restore_result,
-                           extract_transport_outcome)
+                           extract_transport_outcome, recovery_context as original_recovery_context,
+                           verified_resolutions)
 
 from queue_batching import QUIET_WINDOW_SECONDS, select_pending
 from codex_thread_fork import archive_thread, fork_thread, start_thread
 from provider_failure import ProviderCapacityError, terminal_capacity_failure, terminal_provider_failure
 from gateway_lifecycle import LifecycleStore, LifecycleWorker, MaintenancePaused, MaintenanceStopFailed, run_model_process
 from project_profiles import PATROL_DEFAULTS, initial_profiles, source_task_profile
+from command_invocation import exec_spec
 
 import argparse
 from contextlib import ExitStack
@@ -296,10 +298,18 @@ def send_due_reminders(config: dict[str, Any], project_key: str) -> list[dict[st
         reminder_id = str(reminder["reminder_id"])
         text = f"{heading}\n\n{reminder['text']}"
         digest = hashlib.sha256(f"{project_key}\0{reminder_id}\0{bucket}".encode("utf-8")).hexdigest()[:24]
-        payload = client.send_post(str(project["chat_id"]), text, "codex-reminder-" + digest)
-        message_id = str((payload.get("data") or {}).get("message_id") or "")
-        if not message_id:
-            raise GatewayError(f"Reminder returned no message_id: {payload}")
+        try:
+            payload = client.send_post(str(project["chat_id"]), text, "codex-reminder-" + digest)
+            message_id = str((payload.get("data") or {}).get("message_id") or "")
+            if not message_id:
+                raise GatewayError("Reminder returned no message receipt")
+        except Exception:
+            safe_text = ("A scheduled reminder could not be confirmed delivered. Its record is retained; "
+                         "this is a delivery failure, not a failure of the underlying task."
+                         if project_language(project) == "en" else
+                         "定时提醒暂未确认发送成功，提醒记录已保留。这是通知投递异常，不代表提醒所指的任务执行失败。")
+            queue_task_notice_request(project_key, "reminder-delivery:" + digest, safe_text)
+            raise
         mark_sent(project_key, reminder_id)
         sent.append({"reminder_id": reminder_id, "message_id": message_id})
     return sent
@@ -670,10 +680,16 @@ class ProjectStore(LifecycleStore):
     def complete_batch(self, message_ids: list[str], **fields: Any) -> None:
         with self.lock:
             rows = self.state["messages"]
-            previous = {mid: dict(rows[mid]) for mid in message_ids}
+            resolutions = fields.pop("verified_resolutions", {})
+            previous = {mid: dict(rows[mid]) for mid in [*message_ids, *resolutions]}
             try:
                 for mid in message_ids:
                     rows[mid].update(fields, status="completed", updated_at=now_iso())
+                for mid, receipt in resolutions.items():
+                    rows[mid].update(status="completed", updated_at=now_iso(),
+                                     resolution={"completion_message_ids": list(message_ids),
+                                                 "receipt": receipt, "delivered_at": fields.get("completed_at")},
+                                     reaction_sync_error="Recovery delivered; reaction reconciliation pending")
                 self.save()
             except Exception:
                 rows.update(previous)
@@ -827,8 +843,9 @@ def build_prompt(
     elif text.startswith("/direct"):
         text = text[7:].lstrip()
     attachment_lines = "\n".join(f"- {path}" for path in attachments) or "- 无"
-    recovery_context = json.dumps({key: item[key] for key in
-        ("error", "error_kind", "run_event_log", "batch_message_ids", "recovery_records", "task_outcome", "last_final_path") if item.get(key)}, ensure_ascii=False)
+    recovery_context = json.dumps({**(original_recovery_context(item) if any(item.get(k) for k in
+        ("error", "task_outcome", "recovery_records")) else {}), **{key: item[key] for key in
+        ("error", "error_kind", "batch_message_ids", "recovery_records") if item.get(key)}}, ensure_ascii=False)
     workspace_mode = project_workspace_mode(project)
     workspace_label = "General 日常问答" if workspace_mode == "general" else "本地项目"
     permission_mode = project_permission_mode(project)
@@ -1782,14 +1799,69 @@ class ProjectWorker(LifecycleWorker):
             self.lifecycle_signal.set()
 
     def _report_branch_failure(self, message_id: str) -> None:
-        try:
-            self.client.reply_post(
-                message_id,
-                "这条旁支暂未完成，原消息和上下文来源已保留，可按确认的状态重试或对账恢复。",
-                "codex-branch-failed-" + hashlib.sha256(message_id.encode()).hexdigest()[:30],
-            )
-        except Exception:
-            append_log(self.log_path, "failed to report branch failure")
+        text = (
+            "This branch is incomplete. The original request and source context are retained. "
+            "Reconcile thread creation before retrying; no safe draft is available yet."
+            if self.project.get("language") == "en" else
+            "这条旁支暂未完成，原消息和上下文来源已保留。需先核对旁支创建状态再恢复，避免重复执行；目前没有可展示的安全草稿。"
+        )
+        with self.store.lock:
+            notice = self.store._queue_lifecycle_notice("task:branch-failed:" + message_id, text, message_id)
+            notice["failure_source_ids"] = [message_id]
+            self.store.save()
+        self.reconcile_failure_reactions()
+        self.lifecycle_signal.set()
+
+    @staticmethod
+    def _terminal_failure(item):
+        return item.get("status") == "failed" and (
+            int(item.get("attempts") or 0) >= 3 or item.get("branch_state") == "fork_outcome_unknown")
+
+    def _sync_failure_reaction(self, item):
+        mid = item["message_id"]
+        # Read current state, not a stale pre-network snapshot.
+        with self.store.lock:
+            current = dict(self.store.state["messages"][mid])
+        wanted = self._terminal_failure(current)
+        reactions = self._own_reactions(mid, "CrossMark")
+        if wanted:
+            reaction_id = str((reactions[0] if reactions else {}).get("reaction_id") or "")
+            if not reaction_id:
+                reaction_id = self._reaction_id(self.client.add_reaction(mid, "CrossMark"))
+            if not reaction_id:
+                raise GatewayError("Failure reaction has no remote receipt")
+            self.store.update_message(mid, failure_reaction_id=reaction_id, failure_reaction_active=True)
+        else:
+            ids = {str(r.get("reaction_id") or "") for r in reactions}
+            if current.get("failure_reaction_active"):
+                ids.add(str(current.get("failure_reaction_id") or ""))
+            for reaction_id in ids - {""}:
+                self.client.remove_reaction(mid, reaction_id)
+            self.store.update_message(mid, failure_reaction_active=False)
+        with self.store.lock:
+            unchanged = self._terminal_failure(self.store.state["messages"][mid]) == wanted
+            self.store.update_message(mid, reaction_sync_error=None if unchanged else
+                                      "Task state changed during reaction update; reconciliation pending")
+
+    def reconcile_failure_reactions(self):
+        with self.store.lock:
+            rows = [dict(row) for row in self.store.state.get("messages", {}).values()
+                    if row.get("status") != "processing" and (self._terminal_failure(row)
+                    or row.get("failure_reaction_active") or row.get("resolution") and row.get("reaction_sync_error"))]
+        for row in rows:
+            if (self._terminal_failure(row) and row.get("failure_reaction_id")
+                    and row.get("failure_reaction_active") and not row.get("working_reaction_active")
+                    and not row.get("reaction_sync_error")):
+                continue
+            try:
+                if row.get("working_reaction_active") and self._clear_working_reaction(
+                        row["message_id"], str(row.get("working_reaction_id") or "")):
+                    continue
+                self._sync_failure_reaction(row)
+                if self.store.state["messages"][row["message_id"]].get("status") == "completed":
+                    self._replace_working_with_completion(row["message_id"], "")
+            except Exception as exc:
+                self.store.update_message(row["message_id"], reaction_sync_error=str(exc))
 
     def _parallel_loop(self) -> None:
         while True:
@@ -1813,6 +1885,8 @@ class ProjectWorker(LifecycleWorker):
 
     def _start_working_reaction(self, item: dict[str, Any]) -> str:
         message_id = item["message_id"]
+        if item.get("failure_reaction_active") or item.get("reaction_sync_error"):
+            self._sync_failure_reaction(item)
         existing = str(item.get("working_reaction_id") or "").strip()
         if existing and item.get("working_reaction_active"):
             return existing
@@ -1886,10 +1960,20 @@ class ProjectWorker(LifecycleWorker):
             status = str(item.get("status") or "")
             if status == "processing" or status == "ignored":
                 continue
+            if item.get("control_action") == "flush_previous_batch":
+                continue
+            # Reuse durable successful projections; incomplete/error receipts
+            # still reconcile. A restart need not reread every historical reply.
+            if (status == "completed" and item.get("completion_reaction_id")
+                    and item.get("working_reaction_active") is False
+                    and not item.get("failure_reaction_active")
+                    and not item.get("reaction_sync_error")):
+                continue
             message_id = str(item.get("message_id") or "")
             if not message_id:
                 continue
             try:
+                self._sync_failure_reaction(item)
                 typing = self._own_reactions(message_id, WORKING_REACTION)
                 for reaction in typing:
                     reaction_id = str(reaction.get("reaction_id") or "")
@@ -1974,6 +2058,8 @@ class ProjectWorker(LifecycleWorker):
                 self.store.update_message(message_id, task_outcome=outcome, last_final_path=str(final_path))
             if outcome and outcome.get("status") == "incomplete":
                 raise IncompleteTask("Requested work remains incomplete; see retained outcome")
+            with self.store.lock:
+                resolutions = verified_resolutions(outcome, self.store.state["messages"], message_ids, final_path)
             receipt = prepared_result(answer, thread_id, final_path, message_ids)
             with self.store.lock:
                 for message_id in message_ids:
@@ -1993,10 +2079,13 @@ class ProjectWorker(LifecycleWorker):
             phase = "completion"
             answer_sha256 = hashlib.sha256(answer.encode("utf-8")).hexdigest()
             completed_at = now_iso()
-            self.store.complete_batch(
-                message_ids, completed_at=completed_at, answer_sha256=answer_sha256,
-                document_link=document_link, batch_message_ids=message_ids,
-                reply_source_message_id=reply_item["message_id"])
+            with self.store.lock:
+                resolutions = verified_resolutions(outcome, self.store.state["messages"], message_ids, final_path)
+                self.store.complete_batch(
+                    message_ids, completed_at=completed_at, answer_sha256=answer_sha256,
+                    document_link=document_link, batch_message_ids=message_ids,
+                    verified_resolutions=resolutions,
+                    reply_source_message_id=reply_item["message_id"])
             for item in items:
                 message_id = str(item["message_id"])
                 try:
@@ -2066,9 +2155,11 @@ class ProjectWorker(LifecycleWorker):
                 key = "task-failed:" + hashlib.sha256("\0".join(message_ids).encode()).hexdigest()
                 with self.store.lock:
                     if key not in self.store.state.get("lifecycle_notices", {}):
-                        self.store._queue_lifecycle_notice(key, text, reply_item["message_id"])
+                        notice = self.store._queue_lifecycle_notice(key, text, reply_item["message_id"])
+                        notice["failure_source_ids"] = list(message_ids)
                         self.store.save()
         finally:
+            self.reconcile_failure_reactions()
             self.lifecycle_signal.set()
 
     def _loop(self) -> None:
@@ -2116,9 +2207,14 @@ class GatewayService:
             self.chat_to_key[chat_id] = key
 
     def start_workers(self) -> None:
-        for worker in self.workers.values():
+        def prepare(worker: ProjectWorker) -> None:
             worker.reconcile_reactions()
             worker.start()
+        for key, worker in self.workers.items():
+            # Historical network calls for one project cannot block the shared
+            # receive/sync transport or startup of the other project workers.
+            threading.Thread(target=prepare, args=(worker,),
+                             name=f"startup-{key}", daemon=True).start()
 
     def enqueue(self, message: dict[str, Any], tenant_key: str = "") -> bool:
         chat_id = str(message.get("chat_id") or "")
@@ -2180,6 +2276,16 @@ class GatewayService:
                     unknown = [key for key in project_keys if key not in self.workers]
                     if not project_keys or unknown:
                         raise GatewayError(f"Invalid sync request project keys: {project_keys}")
+                    if request.get("task_notice"):
+                        if len(project_keys) != 1:
+                            raise GatewayError("Task notice must target one project")
+                        notice = request["task_notice"]
+                        worker = self.workers[project_keys[0]]
+                        result = worker.store.queue_task_notice(notice["key"], notice["text"], notice.get("message_id"))
+                        worker.lifecycle_signal.set()
+                        atomic_write_json(response_path, {"ok": True, "request_id": request_id, "result": result})
+                        request_path.unlink(missing_ok=True)
+                        continue
                     if request.get("maintenance_action"):
                         if len(project_keys) != 1:
                             raise GatewayError("Maintenance must target exactly one project")
@@ -2419,7 +2525,8 @@ def init_project(args: argparse.Namespace) -> dict[str, Any]:
     if getattr(args, "permission_mode", None):
         overrides["permission_mode"] = args.permission_mode
     inherited = {}
-    if any(not existing_profile.get("agent_" + key) and not overrides.get(key) for key in PATROL_DEFAULTS):
+    if any(not existing_profile.get("agent_" + key) and not overrides.get(key)
+           for key in PATROL_DEFAULTS if key != "permission_mode"):
         inherited = source_task_profile(getattr(args, "source_thread_id", None) or os.environ.get("CODEX_THREAD_ID"), path)
     profiles = initial_profiles(existing_profile, inherited, overrides)
     report_mode = (
@@ -2931,6 +3038,9 @@ def automation_prompt(project_key: str, working_directory: str, report_usage: bo
             f"powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"{script}\" "
             f"-ProjectKey {project_key} -RequestOnly{report_flag}"
         )
+        argv = [str(Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe"),
+                "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script),
+                "-ProjectKey", project_key, "-RequestOnly", "-InspectionReport" if report_usage else "-FirstInspectionMessage"]
     else:
         command_parts = [
             str(runtime_python_path()),
@@ -2944,10 +3054,13 @@ def automation_prompt(project_key: str, working_directory: str, report_usage: bo
         else:
             command_parts.append("--first-inspection-message")
         command = shlex.join(command_parts)
+        argv = command_parts
     return (
         f"运行 {command}。"
         f"脚本会按需启动 Listener、请求异步处理积压后立即返回，{report_text}"
         "不要另发桌面总结；仅失败时简短报告。"
+        "禁止弹出终端窗口。以下执行参数已处理路径转义，直接交给执行工具，不要套用另一种 Shell 或重写引号。\n执行参数："
+        + json.dumps(exec_spec(argv, windows=platform.system() == "Windows"), ensure_ascii=False)
     )
 
 
@@ -3003,6 +3116,29 @@ def install_hourly_automation(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def queue_task_notice_request(project_key, key, text, message_id=None):
+    """Hand off to the sole Listener writer, including when it is offline."""
+    request_id = "notice-" + hashlib.sha256((project_key + "\0" + key).encode()).hexdigest()[:32]
+    payload = {"request_id": request_id, "project_keys": [project_key],
+               "task_notice": {"key": key, "text": text, "message_id": message_id}}
+    path = SYNC_REQUESTS / (request_id + ".json")
+    if path.exists() and load_json(path, {}) != payload:
+        raise GatewayError("Task notification identity already has a different payload")
+    atomic_write_json(path, payload)
+    return {"ok": True, "status": "queued", "request_id": request_id}
+
+
+def task_recovery_context(args):
+    config = load_config()
+    assert_config(config)
+    keys = selected_project_keys(config, args.project_key, None)
+    state = load_json(project_runtime(keys[0]) / "state.json", {})
+    rows = state.get("messages", {})
+    if any(mid not in rows for mid in args.message_id):
+        raise GatewayError("Recovery source is not in the selected project's inbox")
+    return {"original_requests": [original_recovery_context(rows[mid]) for mid in args.message_id]}
+
+
 def request_maintenance(args: argparse.Namespace) -> dict[str, Any]:
     config = load_config()
     assert_config(config)
@@ -3055,6 +3191,14 @@ def request_maintenance(args: argparse.Namespace) -> dict[str, Any]:
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description="Feishu mobile gateway for persistent Codex project threads")
     commands = result.add_subparsers(dest="command", required=True)
+    recovery = commands.add_parser("recovery-context")
+    recovery.add_argument("--project-key", required=True)
+    recovery.add_argument("--message-id", required=True, action="append")
+    notice = commands.add_parser("task-notice")
+    notice.add_argument("--project-key", required=True)
+    notice.add_argument("--key", required=True)
+    notice.add_argument("--text-file", required=True)
+    notice.add_argument("--message-id")
     maintenance = commands.add_parser("maintenance")
     maintenance.add_argument("action", choices=("enter", "exit", "status", "notify-complete"))
     maintenance.add_argument("--project-key", required=True)
@@ -3163,7 +3307,15 @@ def parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
-        if args.command == "maintenance":
+        if args.command == "recovery-context":
+            value = task_recovery_context(args)
+        elif args.command == "task-notice":
+            config = load_config()
+            assert_config(config)
+            selected_project_keys(config, args.project_key, None)
+            value = queue_task_notice_request(args.project_key, args.key,
+                Path(args.text_file).read_text(encoding="utf-8-sig"), args.message_id)
+        elif args.command == "maintenance":
             value = request_maintenance(args)
         elif args.command == "init-project":
             value = init_project(args)

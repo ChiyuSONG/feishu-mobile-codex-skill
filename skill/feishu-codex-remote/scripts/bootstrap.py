@@ -70,12 +70,14 @@ def install() -> dict[str, object]:
     if not report["python_supported"]:
         raise RuntimeError("Python 3.10 or newer is required")
     target = runtime_python()
+    options = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
     if not target.exists():
         REMOTE_STATE.mkdir(parents=True, exist_ok=True)
-        subprocess.run([sys.executable, "-m", "venv", str(REMOTE_STATE / ".venv")], check=True)
+        subprocess.run([sys.executable, "-m", "venv", str(REMOTE_STATE / ".venv")], check=True, **options)
     subprocess.run(
         [str(target), "-m", "pip", "install", "--disable-pip-version-check", "-r", str(REQUIREMENTS)],
         check=True,
+        **options,
     )
     report.update({"ok": True, "installed": True, "runtime_python": str(target)})
     return report

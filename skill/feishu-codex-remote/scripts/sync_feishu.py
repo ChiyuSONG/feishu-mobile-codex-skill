@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -41,7 +42,8 @@ def main() -> int:
         command.append("--first-inspection-message")
     if args.inspection_report:
         command.append("--inspection-report")
-    return subprocess.run(command, check=False).returncode
+    options = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+    return subprocess.run(command, check=False, **options).returncode
 
 
 if __name__ == "__main__":

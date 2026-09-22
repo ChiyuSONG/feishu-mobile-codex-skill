@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -23,11 +24,28 @@ def log(text: str) -> None:
         handle.write(f"[{datetime.now().astimezone().isoformat(timespec='seconds')}] {text}\n")
 
 
+def run_once() -> int:
+    logs = REMOTE_STATE / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    python = Path(sys.executable)
+    if os.name == "nt":
+        python = python.with_name("python.exe")
+    options = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+    with (logs / "gateway-console.log").open("ab") as output:
+        return subprocess.run(
+            [str(python), str(GATEWAY), "run"], stdin=subprocess.DEVNULL,
+            stdout=output, stderr=subprocess.STDOUT, check=False, **options,
+        ).returncode
+
+
 def main() -> int:
     while True:
         log("supervisor starting gateway")
-        result = subprocess.run([sys.executable, str(GATEWAY), "run"], check=False)
-        log(f"gateway exited with code {result.returncode}; restarting in 15 seconds")
+        try:
+            code = run_once()
+        except OSError as exc:
+            code = str(exc)
+        log(f"gateway exited with code {code}; restarting in 15 seconds")
         time.sleep(15)
 
 

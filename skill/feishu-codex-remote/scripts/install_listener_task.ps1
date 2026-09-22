@@ -5,9 +5,11 @@ param(
 $ErrorActionPreference = "Stop"
 $PowerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
 $Runner = Join-Path $PSScriptRoot "run_gateway.ps1"
+$Pythonw = Join-Path $env:LOCALAPPDATA "CodexFeishuRemote\.venv\Scripts\pythonw.exe"
+$Supervisor = Join-Path $PSScriptRoot "supervisor.py"
 
-if (-not (Test-Path -LiteralPath $Runner -PathType Leaf)) {
-    throw "Listener runner does not exist: $Runner"
+if (-not (Test-Path -LiteralPath $Pythonw -PathType Leaf) -or -not (Test-Path -LiteralPath $Supervisor -PathType Leaf)) {
+    throw "Windowless Listener supervisor or runtime is missing"
 }
 
 $Existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
@@ -15,9 +17,9 @@ $WasRunning = $Existing -and $Existing.State -eq "Running"
 
 if ($Existing) {
     $Actions = @($Existing.Actions)
-    if ($Actions.Count -ne 1 -or
-        [string]$Actions[0].Execute -ne $PowerShell -or
-        [string]$Actions[0].Arguments -notlike "*$Runner*") {
+    $LegacyAction = $Actions.Count -eq 1 -and [string]$Actions[0].Execute -eq $PowerShell -and [string]$Actions[0].Arguments -eq "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Runner`""
+    $SilentAction = $Actions.Count -eq 1 -and [string]$Actions[0].Execute -eq $Pythonw -and [string]$Actions[0].Arguments -eq "`"$Supervisor`""
+    if (-not ($LegacyAction -or $SilentAction)) {
         throw "Existing Listener task action is unexpected; refusing to replace it automatically"
     }
 
@@ -27,11 +29,13 @@ if ($Existing) {
     while ($TaskXml.Task.Triggers -and $TaskXml.Task.Triggers.HasChildNodes) {
         [void]$TaskXml.Task.Triggers.RemoveChild($TaskXml.Task.Triggers.FirstChild)
     }
+    $TaskXml.SelectSingleNode('//*[local-name()="Actions"]/*[local-name()="Exec"]/*[local-name()="Command"]').InnerText = [string]$Pythonw
+    $TaskXml.SelectSingleNode('//*[local-name()="Actions"]/*[local-name()="Exec"]/*[local-name()="Arguments"]').InnerText = "`"$Supervisor`""
     Register-ScheduledTask -TaskName $TaskName -Xml $TaskXml.OuterXml -Force | Out-Null
 } else {
     $Action = New-ScheduledTaskAction `
-        -Execute $PowerShell `
-        -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Runner`""
+        -Execute $Pythonw `
+        -Argument "`"$Supervisor`""
     $Settings = New-ScheduledTaskSettingsSet `
         -MultipleInstances IgnoreNew `
         -AllowStartIfOnBatteries `

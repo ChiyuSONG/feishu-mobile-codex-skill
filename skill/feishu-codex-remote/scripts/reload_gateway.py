@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -29,7 +30,8 @@ def main() -> int:
     ]
     if args.request_only:
         command.append("--request-only")
-    return subprocess.run(command, check=False).returncode
+    options = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+    return subprocess.run(command, check=False, **options).returncode
 
 
 if __name__ == "__main__":

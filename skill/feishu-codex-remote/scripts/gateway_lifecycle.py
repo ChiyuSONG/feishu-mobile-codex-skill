@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from datetime import datetime
+import copy
+from functools import wraps
 import hashlib
 import json
 from pathlib import Path
@@ -27,6 +29,20 @@ class MaintenancePaused(GatewayError):
 
 class MaintenanceStopFailed(GatewayError):
     pass
+
+
+def atomic_state_change(method):
+    """Rollback in-memory maintenance state if its durable commit fails."""
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self.lock:
+            previous = copy.deepcopy(self.state)
+            try:
+                return method(self, *args, **kwargs)
+            except Exception:
+                self.state = previous
+                raise
+    return wrapped
 
 
 class LifecycleStore:
@@ -143,12 +159,19 @@ class LifecycleStore:
                     self._defer(row)
             self.save()
 
-    def exit_maintenance(self):
+    @atomic_state_change
+    def exit_maintenance(self, completion=None):
         with self.lock:
             if any(row.get("status") == "processing" and row.get("defer_requested")
                    for row in self.state.get("messages", {}).values()):
                 raise GatewayError("Active work is still stopping; maintenance remains enabled")
             mode = self.state.setdefault("maintenance", {})
+            # The verified intent and exit share one durable write. A restart
+            # between exit and outbox insertion can therefore reconcile it.
+            if completion:
+                if completion["acceptance"]["maintenance_id"] != mode.get("id"):
+                    raise GatewayError("Completion belongs to a different maintenance generation")
+                mode["completion_intent"] = completion
             for row in self.state.get("messages", {}).values():
                 if row.get("status") == "deferred" or (row.get("status") == "pending" and row.get("defer_requested")):
                     row["status"] = "pending"
@@ -162,6 +185,37 @@ class LifecycleStore:
             self.save()
             return dict(mode)
 
+    @atomic_state_change
+    def reconcile_completion_notice(self):
+        with self.lock:
+            mode = self.state.get("maintenance", {})
+            intent = mode.get("completion_intent")
+            if mode.get("active") or not intent:
+                return
+            if "complete:" + intent["release_id"] in self.state.get("lifecycle_notices", {}):
+                return
+            self.validate_notice_acceptance(intent["release_id"], intent["acceptance"])
+            notice = self._queue_lifecycle_notice("complete:" + intent["release_id"], intent["text"])
+            notice["acceptance"] = intent["acceptance"]
+            self.save()
+
+    def validate_notice_acceptance(self, release_id, saved):
+        current = self.verify_acceptance(release_id, saved["path"])
+        if current != saved:
+            raise GatewayError("Accepted release evidence changed before delivery")
+
+    def queue_task_notice(self, key, text, message_id=None):
+        """Caller supplies safe user-facing text; no exception/trace forwarding."""
+        if not isinstance(key, str) or not key.strip() or not isinstance(text, str) or not text.strip():
+            raise GatewayError("Task notification identity and safe text are required")
+        with self.lock:
+            if message_id and message_id not in self.state.get("messages", {}):
+                raise GatewayError("Notification source is outside this project's inbox")
+            notice = self._queue_lifecycle_notice("task:" + key, text, message_id)
+            self.save()
+            return dict(notice)
+
+    @atomic_state_change
     def queue_completion(self, release_id, text, acceptance_file=None):
         if not release_id.strip() or not text.strip():
             raise GatewayError("Release identity and completion text are required")
@@ -252,6 +306,10 @@ class LifecycleWorker:
 
     def maintenance_action(self, action, request_id, reason="", release_id="", text="", acceptance_file=None):
         english = str(self.project.get("language") or "").lower().startswith("en")
+        default = (
+            "The repair has been verified and service has resumed. Retained requests will continue automatically."
+            if english else "修复已验收，服务已恢复，已保留的请求将自动继续处理，无需重发。"
+        )
         if action == "enter":
             notice = (
                 "The system is upgrading. Your request is retained and will resume automatically after maintenance."
@@ -260,12 +318,14 @@ class LifecycleWorker:
             )
             result = self.store.enter_maintenance(request_id, reason, notice)
         elif action == "exit":
-            result = self.store.exit_maintenance()
+            completion = None
+            if release_id or acceptance_file:
+                if not release_id or not acceptance_file:
+                    raise GatewayError("Verified exit requires both release identity and acceptance file")
+                completion = {"release_id": release_id, "text": text or default,
+                              "acceptance": self.store.verify_acceptance(release_id, acceptance_file)}
+            result = self.store.exit_maintenance(completion)
         elif action == "notify-complete":
-            default = (
-                "The repair has been verified and service has resumed. Retained requests will continue automatically."
-                if english else "修复已验收，服务已恢复，已保留的请求将自动继续处理，无需重发。"
-            )
             result = self.store.queue_completion(release_id, text or default, acceptance_file)
         else:
             raise GatewayError("Unknown maintenance action")
@@ -278,6 +338,13 @@ class LifecycleWorker:
         if not self.lifecycle_delivery_lock.acquire(blocking=False):
             return
         try:
+            # Recovery failure must not block unrelated failure/provider notices.
+            try:
+                self.store.reconcile_completion_notice()
+            except Exception as exc:
+                with self.store.lock:
+                    self.store.state["completion_reconciliation_error"] = str(exc)
+                    self.store.save()
             with self.store.lock:
                 pending = [(key, dict(row)) for key, row in self.store.state.get("lifecycle_notices", {}).items()
                            if row.get("status") == "pending" and row.get("retry_at", 0) <= time.time()]
@@ -285,9 +352,22 @@ class LifecycleWorker:
                 with self.store.lock:
                     if self.store.state["lifecycle_notices"][key].get("status") != "pending":
                         continue
+                    failure_sources = notice.get("failure_source_ids")
+                    if not failure_sources and key.startswith("task-failed:") and notice.get("message_id"):
+                        # Older durable notices predate explicit batch bindings.
+                        source = self.store.state.get("messages", {}).get(notice["message_id"], {})
+                        failure_sources = source.get("batch_message_ids") or [notice["message_id"]]
+                    if failure_sources and any(
+                            self.store.state.get("messages", {}).get(mid, {}).get("status") != "failed"
+                            for mid in failure_sources):
+                        self.store.state["lifecycle_notices"][key]["status"] = "cancelled"
+                        self.store.save()
+                        continue
                     if key.startswith("complete:") and self.store.pause_requested():
                         continue
                 try:
+                    if key.startswith("complete:"):
+                        self.store.validate_notice_acceptance(key[len("complete:"):], notice["acceptance"])
                     parts = self.lifecycle_notice_parts(notice["text"])
                     for index, part in enumerate(parts):
                         with self.store.lock:
@@ -297,6 +377,8 @@ class LifecycleWorker:
                             saved = current.get("delivered_parts", {}).get(str(index))
                         if saved:
                             continue
+                        if key.startswith("complete:"):
+                            self.store.validate_notice_acceptance(key[len("complete:"):], notice["acceptance"])
                         send_uuid = notice["uuid"] if index == 0 else notice["uuid"] + "-" + str(index)
                         if notice.get("message_id"):
                             result = self.client.reply_post(notice["message_id"], part, send_uuid)
@@ -357,6 +439,7 @@ class LifecycleWorker:
             self.lifecycle_signal.clear()
             try:
                 self.deliver_lifecycle_notices()
+                self.reconcile_failure_reactions()
                 self.reconcile_branch_archives()
             except Exception as exc:
                 # Keep the failure visible without dropping recovery work.

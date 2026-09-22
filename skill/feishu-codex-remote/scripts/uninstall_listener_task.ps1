@@ -12,10 +12,12 @@ if (-not $Task) {
 }
 
 $ExpectedPowerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+$ExpectedPythonw = Join-Path $env:LOCALAPPDATA "CodexFeishuRemote\.venv\Scripts\pythonw.exe"
+$ExpectedSupervisor = Join-Path (Split-Path -Parent $ExpectedRunner) "supervisor.py"
 $Actions = @($Task.Actions)
-if ($Actions.Count -ne 1 -or
-    [string]$Actions[0].Execute -ne $ExpectedPowerShell -or
-    [string]$Actions[0].Arguments -notlike "*$ExpectedRunner*") {
+$LegacyAction = $Actions.Count -eq 1 -and [string]$Actions[0].Execute -eq $ExpectedPowerShell -and [string]$Actions[0].Arguments -eq "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ExpectedRunner`""
+$SilentAction = $Actions.Count -eq 1 -and [string]$Actions[0].Execute -eq $ExpectedPythonw -and [string]$Actions[0].Arguments -eq "`"$ExpectedSupervisor`""
+if (-not ($LegacyAction -or $SilentAction)) {
     throw "Existing task is not owned by Feishu Remote Codex; refusing to remove it"
 }
 

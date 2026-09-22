@@ -54,6 +54,40 @@ The user sees the failed phase, known completed/unfinished/blocked portions and
 next step. Say when the detailed cause is unknown instead of inventing one.
 Optional safe drafts are labeled unapproved; raw exceptions stay local.
 
+`OUTCOME_FIELDS` in `task_contract.py` is the source for prompt field types and
+both file/transport validation. Present malformed fields are reported together;
+legacy receipts may omit optional fields. Do not force ordinary successful
+answers into a new schema or add a model call merely to validate transport.
+If a usable safe draft does not exist, explain that via
+`draft_unavailable_reason`; never copy raw logs into user-facing failure text.
+
+For an explicitly requested repair of a different failed message, use the local
+read-only `recovery-context --project-key <key> --message-id <original>` command.
+It reads only specified originals from that registered inbox, including their
+source fingerprint and prior completed effects. Do not scan sibling projects or
+turn historical findings into new requirements. The optional `resolutions` field
+is defined by `task_contract.py`; bind each claim to the unchanged original and
+current verification artifacts. The original becomes completed only after the
+repair's final result is delivered and the linked state change is committed.
+Unrelated successes, a code fix alone, or a stale test log never resolve it.
+These checks establish provenance and integrity, not independent semantic truth:
+actual effects and any required domain review remain the project's responsibility.
+
+Terminal failures project `CrossMark`; pending/provider-wait/maintenance states
+do not. Remove the failure mark on requeue, and replace it with `CheckMark` only
+after verified original-task recovery and delivery. Persist reaction receipts;
+reconcile missing/error receipts after restart without repeating completed work.
+Main and branch failures use the existing lifecycle outbox with stable identity.
+Cancel an unsent failure notice when its original is no longer failed.
+
+Background work without a source message uses the same Listener-owned outbox,
+not a fabricated source ID or a second state writer. The internal `task-notice
+--project-key <key> --key <stable-run-identity> --text-file <safe-text>` command
+persists a request; it reports queued, not delivered. Omit `--message-id` for
+background notices. Keep existing schedules, notification preferences and domain
+behavior unchanged. Never include raw exceptions or private diagnostics in the
+text file. Notification failure alone must not be called business-task failure.
+
 ## Native Capacity And Quota Errors
 
 `scripts/provider_failure.py` classifies only the final native JSONL outcome.
@@ -128,6 +162,7 @@ python -m unittest discover -s scripts -p "test_*.py"
 | Quiet window, star barriers, retained source IDs | `test_queue_batching.py` |
 | Maintenance arrival/stop/restart/notice retry; temporary cleanup | `test_gateway_lifecycle.py` |
 | Partial result, prepared reply replay, late failure, acceptance evidence and notification receipts | `test_task_contract.py` |
+| Failure reactions, schema errors, original-task resolution, no-source notices, crash/restart and stale evidence | `test_generic_recovery.py` |
 | Delivery, attachments, scope, context bridge and existing policies | `test_remote_gateway.py` and edition-specific tests |
 
 Use isolated temporary fixtures. Distinguish simulated model/Feishu tests from
@@ -165,3 +200,63 @@ arbitrary test claims; the maintainer remains responsible for meaningful tests.
 New maintenance cancels an unsent obsolete completion notice. Exit still uses
 the existing catch-up/worker wake-up path, without another worker or scheduled job.
 Skill source updates alone do not authorize changing live schedules or profiles.
+
+Prefer `maintenance exit --project-key <key> --release-id <version>
+--acceptance-file <path>` when acceptance is ready: the Listener first completes
+catch-up, then durably stores exit and completion intent together. Its existing
+lifecycle loop restores a missing outbox entry after a crash. A plain exit is
+still supported when no completion claim is ready; it does not invent acceptance.
+`notify-complete` remains available after later verification. Before sending or
+retrying completion parts, recheck the same acceptance-file hash, artifact hashes,
+maintenance generation and required original outcomes. Changed evidence holds the
+completion notice without blocking unrelated failure notices. Never relabel an
+old acceptance file to approve different inputs or code.
+
+This reuses the transactional-outbox/idempotent-consumer approach rather than a
+new scheduler, external queue or model-based recovery service. Reference:
+https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/transactional-outbox.html
+
+
+## Listener Lifecycle Regression Gate
+
+For every relevant change, rerun the complete suite above, not only the formerly
+failing case. Retain the tests with the package. `test_patrol_entrypoint.py`
+executes the real Windows wrapper against isolated Scheduler/child fixtures
+(including spaces and non-ASCII paths): stopped/running startup, denied access,
+trigger rejection, nonblocking inspection, manual drain and error propagation.
+`test_startup_reactions.py` verifies independent project startup and durable
+completion-reaction reuse; missing/error receipts stay repairable. On non-Windows
+hosts report Windows-specific skips, not Windows acceptance.
+
+The Windows launch chain uses a demand-only Task Scheduler action pointing to
+`pythonw.exe supervisor.py`, with hidden children and durable diagnostic output.
+Do not substitute direct worker launch after an access-denied error. Retain exact
+launcher ownership checks and one shared consumer. Repeated starts must preserve
+active work; macOS kickstart must not use the destructive `-k` option.
+
+Before declaring a live patrol repair complete, pair each scheduled turn's own
+permissions, timestamps, command, result and final status. A UI preference, a
+config file, a different turn or a maintenance agent's probe does not prove the
+patrol's effective permission. Verify the exact Hook's current trust state.
+After safe drain and confirmed child exit, test actual scheduled recovery from a
+stopped Listener for each affected independent patrol. Observe one process tree,
+reconciliation acknowledgement, asynchronous progress handling and no visible
+console window. An earlier empty-queue snapshot is not authority to kill a
+worker. If controlled recovery fails, restore the existing launcher and report
+failure; do not add another consumer, permission bypass or schedule.
+
+`command_invocation.py` owns the generated shell transport. Windows uses the
+documented UTF-16LE PowerShell `EncodedCommand` from a noninteractive, hidden
+`cmd.exe` invocation; literal arguments avoid cross-shell quoting ambiguity.
+The prompt retains the readable command plus exact tool arguments. This changes
+transport only, not permission or failure handling. `test_command_invocation.py`
+executes a real command with Unicode, spaces and shell-special characters and
+checks argument and exit-code preservation; do not reinstate arbitrary prompt
+length caps that discard the executable contract. Reference:
+https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_powershell_exe?view=powershell-5.1
+
+Keep per-run logs, source fingerprints and acceptance receipts outside the Skill.
+Document live vs simulated coverage and platform limits. Updating package code
+alone must not rewrite existing project Automations, models, permissions,
+reporting modes or domain-owned systems. Source changes to provisioning defaults
+apply to new registrations, not retroactive enforcement on existing projects.

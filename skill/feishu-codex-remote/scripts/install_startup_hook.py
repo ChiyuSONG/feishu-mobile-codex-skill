@@ -34,7 +34,10 @@ def hook_path() -> Path:
 
 
 def hook_command(system: str | None = None) -> str:
-    parts = [str(runtime_python(system)), str(SCRIPT_DIR / "listener_control.py"), "start"]
+    python = runtime_python(system)
+    if (system or platform.system()) == "Windows":
+        python = python.with_name("pythonw.exe")
+    parts = [str(python), str(SCRIPT_DIR / "listener_control.py"), "start"]
     return subprocess.list2cmdline(parts) if (system or platform.system()) == "Windows" else shlex.join(parts)
 
 

@@ -58,7 +58,11 @@ def initial_profiles(existing, inherited, overrides):
     missing = []
     for key, default in PATROL_DEFAULTS.items():
         result["patrol_" + key] = str(existing.get("patrol_" + key) or "").strip() or default
-        value = next((str(v).strip() for v in (existing.get("agent_" + key), overrides.get(key), inherited.get(key)) if v and str(v).strip()), None)
+        # Permissions are an independent, disclosed product default. Do not
+        # accidentally copy a source task's transient sandbox into a new worker.
+        # Existing and explicitly requested lower modes remain authoritative.
+        source = "full-access" if key == "permission_mode" else inherited.get(key)
+        value = next((str(v).strip() for v in (existing.get("agent_" + key), overrides.get(key), source) if v and str(v).strip()), None)
         if value:
             result["agent_" + key] = value
         else:

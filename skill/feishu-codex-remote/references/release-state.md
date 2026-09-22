@@ -61,7 +61,7 @@ Generalize the proven reminder interaction without importing project-specific he
 - When several active reminders could match “完成了” or “取消它”, ask which one rather than closing one by guess.
 - Keep reminder content scoped to the bound workstream and never copy private records from another project.
 
-## Current Release Baseline (2026-09-11)
+## Current Release Baseline (2026-09-22)
 
 | Capability | Current state |
 | --- | --- |
@@ -76,13 +76,28 @@ Generalize the proven reminder interaction without importing project-specific he
 | Chinese and English | Chinese remains the default; English welcome, inspection, reminder, usage and document-link text are implemented; real bilingual Feishu test pending |
 | Deterministic natural-language changes to inspection schedule | Not implemented; do not promise a specific sub-hour cadence until Codex Automation support is verified |
 | General natural-language reminder persistence | Implemented as a project-scoped append-only log with continuous and one-time modes; real Feishu end-to-end testing remains |
-| Windows listener lifecycle | Preserved with PowerShell and Windows Task Scheduler |
+| Generic failure and recovery contract | Terminal failure reactions, source-bound delivered recovery, typed backward-compatible outcomes, durable branch/background notices and recoverable verified maintenance exit; retained fault-injection tests, not new live-delivery acceptance |
+| Windows listener lifecycle | Windowless pythonw supervisor and hidden children; exact legacy-action migration/uninstall, independent project startup and durable reaction reuse; real PowerShell fixtures covered |
 | macOS listener lifecycle | Implemented with a Python wrapper, per-user demand-start `launchd`, an explicit persisted `CODEX_CLI_PATH`, and non-destructive repeated SessionStart behavior matching Windows; real Mac test pending |
 | Portable credential storage | Implemented as Windows DPAPI or macOS Keychain using the absolute system security tool; real launchd-context Mac test pending |
 | Conversational uninstall | Implemented with preview, active-work refusal, component-scoped removal, recovery-by-default, and explicit local-data purge; clean-machine test pending |
 | Clean-machine packaging and public installation test | Not completed |
 
 The package is therefore a Release candidate, not yet a clean-machine-accepted public release.
+
+The September consolidation retains existing batching, provider recovery,
+partial-result handoff and maintenance behavior. It adds retained startup,
+shell-transport and launcher regression coverage and aligns new-remote default
+permissions with the disclosed Full Access policy; existing explicit profiles
+remain unchanged. Prior live Windows repair evidence validates that deployment,
+not an unperformed clean-machine or macOS installation of this package.
+
+The generic recovery follow-up reuses the existing inbox and lifecycle outbox.
+Release-only reminder delivery failures hand off safe notices through the sole
+Listener writer; reminder cadence, opt-in, business state and report modes remain
+unchanged. No domain ledger, domain reviewer, personal records or production
+registration is included. Relevant future edits must rerun the complete retained
+suite; the existing manually triggered CI remains manually triggered.
 
 ## Cross-Platform Boundary
 

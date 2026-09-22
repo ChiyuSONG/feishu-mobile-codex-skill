@@ -32,7 +32,7 @@ terminal notices, concurrent recovery and maintenance alongside the baseline.
 - Pending: no reaction.
 - Processing: add `Typing` only for the atomically claimed batch immediately before Codex processing, after preparing attachments; queueing, waiting, and download preparation do not add it.
 - Completed: remove the exact `Typing` reaction and add `CheckMark`.
-- Failed: remove `Typing`, do not add `CheckMark`, and send a visible failure.
+- Failed: remove `Typing`; terminal failure gets `CrossMark` and a durable visible failure notice, never `CheckMark`. Requeue clears `CrossMark`; only delivered, verified original-task recovery can complete the original. See the recovery contract below.
 
 All user-visible requests, clarifications, results, failures, retries, and artifact links stay recoverable in Feishu. Progress snapshots may reuse a user-visible `agent_message` or a generic event category, but hidden prompts, commands, reasoning, raw tool output, internal IDs, and local paths do not.
 

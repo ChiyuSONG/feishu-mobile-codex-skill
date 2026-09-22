@@ -32,7 +32,7 @@ class ProfileTests(unittest.TestCase):
         result = profiles.initial_profiles({}, source, {})
         self.assertEqual(result["agent_model"], "source-model")
         self.assertEqual(result["agent_service_tier"], "priority")
-        self.assertEqual(result["agent_permission_mode"], "auto-review")
+        self.assertEqual(result["agent_permission_mode"], "full-access")
         self.assertEqual({k.removeprefix("patrol_"): v for k, v in result.items() if k.startswith("patrol_")}, profiles.PATROL_DEFAULTS)
         source.update(model="changed", service_tier="default")
         self.assertEqual(profiles.initial_profiles(result, source, {}), result)
@@ -40,10 +40,23 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(profiles.initial_profiles(result, source, {})["patrol_model"], "custom-patrol")
 
     def test_missing_source_is_not_silently_replaced_by_patrol(self):
-        with self.assertRaisesRegex(gateway.GatewayError, "model.*reasoning_effort.*service_tier.*permission_mode"):
+        with self.assertRaisesRegex(gateway.GatewayError, "model.*reasoning_effort.*service_tier"):
             profiles.initial_profiles({}, {}, {})
         with self.assertRaisesRegex(gateway.GatewayError, "service_tier"):
             profiles.initial_profiles({}, dict(model="source", reasoning_effort="high", permission_mode="full-access"), {})
+
+    def test_explicit_lower_permissions_are_not_upgraded(self):
+        source = dict(model="source", reasoning_effort="high", service_tier="priority")
+        for mode in ("auto-review", "project-only-auto", "full-access"):
+            with self.subTest(mode=mode):
+                explicit = profiles.initial_profiles({}, source, {"permission_mode": mode})
+                self.assertEqual(explicit["agent_permission_mode"], mode)
+                preserved = profiles.initial_profiles(explicit, source, {"permission_mode": "full-access"})
+                self.assertEqual(preserved["agent_permission_mode"], mode)
+
+    def test_new_permissions_do_not_require_source_sandbox_metadata(self):
+        source = dict(model="source", reasoning_effort="medium", service_tier="default")
+        self.assertEqual(profiles.initial_profiles({}, source, {})["agent_permission_mode"], "full-access")
 
     def test_read_exact_source_and_last_turn_without_mutation(self):
         with tempfile.TemporaryDirectory() as raw:

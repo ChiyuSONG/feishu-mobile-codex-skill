@@ -591,7 +591,9 @@ class RoutingTests(unittest.TestCase):
         self.assertIn("不要另发桌面总结", content)
         self.assertNotIn(r"C:\项目\测试", content)
         with patch.object(remote_gateway, "SCRIPT_DIR", Path("C:/gateway")):
-            self.assertLess(len(remote_gateway.automation_prompt("demo", r"C:\项目\测试", True)), 300)
+            spec = json.loads(remote_gateway.automation_prompt("demo", r"C:\项目\测试", True).split("执行参数：", 1)[1])
+            self.assertFalse(spec["login"])
+            self.assertFalse(spec["tty"])
         self.assertIn("-RequestOnly", content)
         self.assertNotIn("-FirstInspectionMessage", content)
         self.assertIn('rrule = "FREQ=HOURLY;INTERVAL=1"', content)

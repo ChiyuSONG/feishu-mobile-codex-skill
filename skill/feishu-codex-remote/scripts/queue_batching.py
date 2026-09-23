@@ -4,7 +4,7 @@ import json
 import time
 from gateway_common import message_text, resource_keys
 
-QUIET_WINDOW_SECONDS = 60.0
+QUIET_WINDOW_SECONDS = 5.0
 
 def route_key(item):
     sender = item.get("sender") or {}

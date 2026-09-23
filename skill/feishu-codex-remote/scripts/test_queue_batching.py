@@ -48,14 +48,14 @@ class QuietWindowTests(unittest.TestCase):
                 worker._process_batch(claimed)
             run.assert_not_called()
             self.assertEqual(worker.store.state['messages']['flush']['status'],'completed')
-    def test_default_sixty_seconds_includes_followup_at_twenty_one(self):
-        self.assertEqual(qb.QUIET_WINDOW_SECONDS, 60)
-        rows = [item("image",100), item("followup",121)]
+    def test_default_five_seconds_includes_quick_followup(self):
+        self.assertEqual(qb.QUIET_WINDOW_SECONDS, 5)
+        rows = [item("image",100), item("followup",103)]
         rows[0]["message_type"] = "image"
         select = lambda now: qb.select_pending(rows, gateway.forced_single_message, gateway.explicit_routing_mode, now=now)
-        self.assertEqual(select(130), ([],51))
-        self.assertEqual(select(180.9)[0], [])
-        self.assertEqual([x["message_id"] for x in select(181)[0]], ["image","followup"])
+        self.assertEqual(select(105), ([],3))
+        self.assertEqual(select(107.9)[0], [])
+        self.assertEqual([x["message_id"] for x in select(108)[0]], ["image","followup"])
     def test_waits_exactly_until_last_receipt_plus_fifteen(self):
         rows=[item("a")]
         self.assertEqual(choose(rows,114.9)[0],[])
@@ -113,11 +113,11 @@ class QuietWindowTests(unittest.TestCase):
             with patch.object(gateway,"now_iso",return_value=datetime.fromtimestamp(110,timezone.utc).isoformat()):
                 self.assertFalse(store.enqueue(item("a")))
             restarted=gateway.ProjectStore("test")
-            with patch.object(qb.time,"time",return_value=114):
+            with patch.object(qb.time,"time",return_value=104):
                 self.assertEqual(restarted.next_pending_batch(),[])
-                self.assertEqual(restarted.pending_wait_seconds(),46)
+                self.assertEqual(restarted.pending_wait_seconds(),1)
                 self.assertEqual(restarted.state["messages"]["a"]["status"],"pending")
-            with patch.object(qb.time,"time",return_value=160):
+            with patch.object(qb.time,"time",return_value=105):
                 self.assertEqual(len(restarted.next_pending_batch()),1)
                 self.assertEqual(restarted.state["messages"]["a"]["status"],"processing")
 

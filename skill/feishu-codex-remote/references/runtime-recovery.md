@@ -142,6 +142,39 @@ upgrading Codex. If unsupported or inconsistent, preserve the request and report
 the branch failure. Do not claim compatibility with every future Codex version.
 Original native forks and main turns do not depend on this fallback succeeding.
 
+## Regression Maintenance
+
+Keep this section as the maintenance-test owner; project acceptance criteria
+remain in their existing canonical sources. Use the existing test suite and
+case catalog rather than creating a parallel policy or testing framework.
+
+- When a behavior changes, review its code, prompt, references and tests together.
+  Replace obsolete assertions with current behavioral checks; do not preserve an
+  old restriction merely to keep a test green, or delete a failing test without
+  preserving coverage of the still-required capability.
+- Hard checks cover objective transport/state invariants, such as receipt types,
+  source identity and artifact integrity. Synonyms, explanatory labels and item
+  meaning belong to an existing project semantic reviewer, not a new keyword,
+  alias or item-count veto in the gateway. Retain both equivalent-expression
+  positives and genuinely incomplete/conflicting negatives. Transport tests
+  establish lossless handoff, not semantic correctness.
+- For a real failure, retain the original input and relevant pre-run state in the
+  project's private test assets: source order, grouping/entrypoint, attachments,
+  prior committed effects and code/criteria version. Reconstruct only necessary
+  state and disclose material differences from production. Never publish private
+  replay data or credentials; public fixtures are explicitly synthetic.
+- Test small components before affected integration/replay paths. Run the complete
+  fast suite for package releases. For costly project model replays, prioritize
+  changed behavior, recent/repeated failures and representative workflows; follow
+  the approved task scope and budget. A changed semantic prompt needs multiple
+  representative positive/negative cases, not a phrase-presence assertion or a
+  single successful answer.
+- Record code/criteria versions, selected cases, omitted coverage and outcomes.
+  Separate examples used for tuning from unseen acceptance. Distinguish component
+  mocks, real local subprocess tests, isolated model replay and live delivery;
+  one does not prove the others. Do not relabel failed, skipped or unrun checks
+  as passed. Fix obsolete fixtures without weakening their required assertions.
+
 ## Acceptance Evidence
 
 Run from the selected Skill root:
@@ -161,8 +194,10 @@ python -m unittest discover -s scripts -p "test_*.py"
 | Ordinary/hash overlap, duplicate claims, bootstrap, reload | `test_parallel_hash.py` |
 | Quiet window, star barriers, retained source IDs | `test_queue_batching.py` |
 | Maintenance arrival/stop/restart/notice retry; temporary cleanup | `test_gateway_lifecycle.py` |
+| Checkpoint/communication exceptions, stop failure, real hidden child reaping and subsequent execution | `test_gateway_lifecycle.py` |
 | Partial result, prepared reply replay, late failure, acceptance evidence and notification receipts | `test_task_contract.py` |
 | Failure reactions, schema errors, original-task resolution, no-source notices, crash/restart and stale evidence | `test_generic_recovery.py` |
+| Wording-preserving delivery, declared omissions and prior review handoff (transport only) | `test_generic_recovery.py` |
 | Delivery, attachments, scope, context bridge and existing policies | `test_remote_gateway.py` and edition-specific tests |
 
 Use isolated temporary fixtures. Distinguish simulated model/Feishu tests from

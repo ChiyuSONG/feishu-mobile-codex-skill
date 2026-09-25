@@ -39,6 +39,64 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual({'status': 'incomplete'}, contract.validate_outcome({'status': 'incomplete'}))
         self.assertIsNone(contract.read_outcome(self.final()))
 
+    def test_reply_wording_is_opaque_to_gateway_not_a_semantic_gate(self):
+        # Synthetic semantic variants: only transport, not a model-review test.
+        replies = [
+            "Recommended: laptop. Alternative: desktop.",
+            "Recommended: notebook computer (first choice). Alternative: desktop computer.",
+            "First choice: laptop. Explanation: the laptop meets the portability need.",
+        ]
+        for index, answer in enumerate(replies):
+            with self.subTest(answer=answer):
+                mid = "wording-" + str(index)
+                self.enqueue(mid, "Compare portable and desktop computers")
+                path = self.final(answer)
+                batch = self.store.next_pending_batch(quiet_window_seconds=0)
+                with patch.object(gateway, "run_codex", return_value=(answer, "main", path)) as run, \
+                        patch.object(gateway, "reply_complete", return_value="") as send:
+                    self.worker._process_batch(batch)
+                run.assert_called_once()
+                self.assertEqual(answer, send.call_args.args[3])
+                self.assertEqual("completed", self.store.state["messages"][mid]["status"])
+
+    def test_declared_omission_is_not_overridden_by_success_sounding_draft(self):
+        self.enqueue()
+        self.store.finish("one", "pending", attempts=2)
+        draft = "Completed the chart (preferred version)."
+        path = self.final(draft)
+        outcome = {
+            "status": "incomplete", "completed": ["Chart saved"],
+            "failed": ["Requested accessible text alternative missing"],
+            "reason": "The requested text alternative was not generated",
+            "safe_draft": draft, "next_step": "Add the missing text alternative",
+        }
+        path.with_name("outcome.json").write_text(json.dumps(outcome), encoding="utf-8")
+        self.assertEqual((1, 0), self.process(self.store.next_pending_batch(quiet_window_seconds=0), path))
+        self.assertEqual("failed", self.store.state["messages"]["one"]["status"])
+        self.worker.deliver_lifecycle_notices()
+        notice = self.client.reply_post.call_args.args[1]
+        self.assertIn(outcome["reason"], notice)
+        self.assertIn(draft, notice)
+        self.assertEqual(outcome, self.store.state["messages"]["one"]["task_outcome"])
+
+    def test_prior_findings_and_evidence_survive_restart_into_next_prompt(self):
+        self.enqueue()
+        outcome = {
+            "status": "incomplete", "completed": ["Chart committed"],
+            "failed": ["Text alternative missing"],
+            "reason": "Review: explanatory labels are not additional chart series",
+            "evidence": ["chart.svg", "review.json"],
+            "safe_draft": "Notebook computer (also called laptop): chart saved.",
+        }
+        self.store.finish("one", "pending", attempts=1, task_outcome=outcome)
+        self.restart()
+        row = self.store.state["messages"]["one"]
+        self.assertEqual(outcome, row["task_outcome"])
+        prompt = gateway.build_prompt("test", self.project, row, [], first_turn=False)
+        for value in [outcome["reason"], outcome["safe_draft"], *outcome["evidence"],
+                      *outcome["completed"], *outcome["failed"]]:
+            self.assertIn(value, prompt)
+
     def test_transport_and_file_have_same_validation(self):
         path = self.final()
         invalid = {'status': 'completed', 'evidence': 'bad'}

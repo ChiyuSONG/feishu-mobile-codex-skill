@@ -350,6 +350,85 @@ class LifecycleTests(unittest.TestCase):
         self.assertIsNone(process.communicate.call_args.kwargs["input"])
         process.kill.assert_not_called()
 
+    def test_checkpoint_error_reaps_owned_process_and_preserves_cause(self):
+        self.enqueue()
+        process = MagicMock()
+        process.stdin.closed = False
+        process.communicate.side_effect = subprocess.TimeoutExpired("fake", 1)
+        error = OSError("state read failed")
+        with patch.object(lifecycle.subprocess, "Popen", return_value=process), \
+                patch.object(self.store, "pause_requested", side_effect=[False, error]), \
+                patch.object(lifecycle, "_stop_process_tree") as stop:
+            with self.assertRaises(OSError) as result:
+                lifecycle.run_model_process(["fake"], input=b"request", store=self.store,
+                                            message_ids=["one"])
+        self.assertIs(error, result.exception)
+        stop.assert_called_once_with(process)
+        process.stdin.close.assert_called_once()
+
+    def test_checkpoint_error_with_failed_stop_remains_an_ownership_error(self):
+        self.enqueue()
+        process = MagicMock()
+        process.stdin.closed = False
+        process.communicate.side_effect = subprocess.TimeoutExpired("fake", 1)
+        stop_error = OSError("owned process still alive")
+        with patch.object(lifecycle.subprocess, "Popen", return_value=process), \
+                patch.object(self.store, "pause_requested", side_effect=[False, OSError("state read failed")]), \
+                patch.object(lifecycle, "_stop_process_tree", side_effect=stop_error) as stop:
+            with self.assertRaises(lifecycle.MaintenanceStopFailed) as result:
+                lifecycle.run_model_process(["fake"], input=b"", store=self.store,
+                                            message_ids=["one"])
+        self.assertIs(stop_error, result.exception.__cause__)
+        stop.assert_called_once_with(process)
+        process.stdin.close.assert_called_once()
+
+    def test_communication_exception_also_cleans_owned_process(self):
+        for error in [BrokenPipeError("pipe closed"), KeyboardInterrupt()]:
+            with self.subTest(error=type(error).__name__):
+                process = MagicMock()
+                process.stdin.closed = False
+                process.communicate.side_effect = error
+                with patch.object(lifecycle.subprocess, "Popen", return_value=process), \
+                        patch.object(lifecycle, "_stop_process_tree") as stop:
+                    with self.assertRaises(type(error)) as result:
+                        lifecycle.run_model_process(["fake"], input=b"request", store=self.store,
+                                                    message_ids=[])
+                self.assertIs(error, result.exception)
+                stop.assert_called_once_with(process)
+                process.stdin.close.assert_called_once()
+
+    def test_real_checkpoint_failure_reaps_child_and_next_run_succeeds(self):
+        command = [sys.executable, "-c", "import time; time.sleep(60)"]
+        owned = []
+        real_spawn = subprocess.Popen
+
+        def spawn(*args, **kwargs):
+            process = real_spawn(*args, **kwargs)
+            if args[0] == command:
+                owned.append(process)
+            return process
+
+        kwargs = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                      creationflags=gateway.CREATE_NO_WINDOW, cwd=str(self.root))
+        try:
+            with patch.object(lifecycle.subprocess, "Popen", side_effect=spawn), \
+                    patch.object(self.store, "pause_requested",
+                                 side_effect=[False, OSError("checkpoint unavailable")]):
+                with self.assertRaisesRegex(OSError, "checkpoint unavailable"):
+                    lifecycle.run_model_process(command, input=b"", store=self.store,
+                                                message_ids=[], **kwargs)
+            self.assertEqual(1, len(owned))
+            self.assertIsNotNone(owned[0].poll())
+            self.assertTrue(owned[0].stdin.closed)
+            result = lifecycle.run_model_process(
+                [sys.executable, "-c", "pass"], input=b"", store=self.store,
+                message_ids=[], **kwargs)
+            self.assertEqual(0, result.returncode)
+        finally:
+            for process in owned:
+                if process.poll() is None:
+                    lifecycle._stop_process_tree(process)
+
     def test_process_paused_before_launch_starts_nothing(self):
         self.enter()
         with patch.object(lifecycle.subprocess, "Popen") as spawn, self.assertRaises(lifecycle.MaintenancePaused):

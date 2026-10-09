@@ -31,6 +31,7 @@ class PatrolEntrypointTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='patrol fixture 中文 ') as tmp:
             root = Path(tmp)
             shutil.copy2(SCRIPTS / 'sync_feishu.ps1', root / 'sync_feishu.ps1')
+            shutil.copy2(SCRIPTS / 'windowless_process.ps1', root / 'windowless_process.ps1')
             # All evidence and fake child output are confined to this temporary directory.
             (root / 'remote_gateway.py').write_text(
                 'import json,sys\nfrom pathlib import Path\n'

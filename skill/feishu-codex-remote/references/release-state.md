@@ -66,7 +66,7 @@ Generalize the proven reminder interaction without importing project-specific he
 | Capability | Current state |
 | --- | --- |
 | Durable ordered Feishu inbox, offline recovery, persistent Codex thread | Implemented and covered by deterministic tests |
-| Missed-event reconciliation | Implemented at startup and confirmed SDK reconnect, plus the existing hourly catch-up for opted-in workstreams; real macOS interruption testing remains |
+| Missed-event reconciliation | Startup/reconnect intent is durable per group; complete history scans alone advance the cursor. Functional application PONG, control/worker supervision and native singleton ownership have isolated regression coverage; real macOS interruption testing remains |
 | Direct Feishu replies and private-document routing | Implemented; explicit in-project Markdown images are sent as native image replies and explicit PDF/Excel deliverables as native file replies after tenant verification; private documents and private-file links remain the fallback for complex content and other artifacts |
 | One-prompt installer | Skill workflow and runtime bootstrap implemented; real clean-machine/CUA onboarding not yet accepted |
 | QR/login-based Feishu authorization | Browser OAuth with a localhost callback is implemented and can use Feishu's QR login when offered; real clean-account testing remains |
@@ -76,7 +76,7 @@ Generalize the proven reminder interaction without importing project-specific he
 | Chinese and English | Chinese remains the default; English welcome, inspection, reminder, usage and document-link text are implemented; real bilingual Feishu test pending |
 | Deterministic natural-language changes to inspection schedule | Not implemented; do not promise a specific sub-hour cadence until Codex Automation support is verified |
 | General natural-language reminder persistence | Implemented as a project-scoped append-only log with continuous and one-time modes; real Feishu end-to-end testing remains |
-| Generic failure and recovery contract | Terminal failure reactions, source-bound delivered recovery, typed backward-compatible outcomes, durable branch/background notices and recoverable verified maintenance exit; retained fault-injection tests, not new live-delivery acceptance |
+| Generic failure and recovery contract | Original child-run identity, native provider-failure classification, per-part remote delivery receipts and atomic verified attachment reuse extend the existing inbox and lifecycle outbox. Retained fault-injection tests cover crash/restart without repeating verified work; this is not new live-delivery acceptance |
 | Windows listener lifecycle | Windowless pythonw supervisor and hidden children; exact legacy-action migration/uninstall, independent project startup and durable reaction reuse; real PowerShell fixtures covered |
 | macOS listener lifecycle | Implemented with a Python wrapper, per-user demand-start `launchd`, an explicit persisted `CODEX_CLI_PATH`, and non-destructive repeated SessionStart behavior matching Windows; real Mac test pending |
 | Portable credential storage | Implemented as Windows DPAPI or macOS Keychain using the absolute system security tool; real launchd-context Mac test pending |

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from gateway_primitives import HTTP_TIMEOUT_SECONDS, atomic_write_json, load_json
+
 import base64
 import ctypes
 from ctypes import wintypes
@@ -9,7 +11,6 @@ import os
 from pathlib import Path
 import platform
 import subprocess
-import tempfile
 import time
 from typing import Any
 import urllib.error
@@ -203,28 +204,6 @@ def delete_protected(path: Path, *, system: str | None = None) -> None:
     raise GatewayError(f"Unsupported credential platform: {current}")
 
 
-def load_json(path: Path, default: Any = None) -> Any:
-    if not path.exists():
-        return default
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def atomic_write_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
-            json.dump(value, handle, ensure_ascii=False, indent=2, sort_keys=True)
-            handle.write("\n")
-        os.replace(temp_name, path)
-    except BaseException:
-        try:
-            os.unlink(temp_name)
-        except FileNotFoundError:
-            pass
-        raise
-
-
 def load_config() -> dict[str, Any]:
     config = load_json(CONFIG_PATH, {})
     if not isinstance(config, dict):
@@ -300,6 +279,9 @@ def resource_keys(raw: Any) -> list[tuple[str, str]]:
     return sorted(found)
 
 
+# Shared HTTP transport inactivity timeout; not a model-turn deadline.
+
+
 class FeishuClient:
     def __init__(self, app_id: str, app_secret: str) -> None:
         self.app_id = app_id
@@ -310,7 +292,7 @@ class FeishuClient:
 
     def _open(self, request: urllib.request.Request):
         try:
-            return urllib.request.urlopen(request, timeout=60)
+            return urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS)
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             raise GatewayError(f"Feishu HTTP {exc.code}: {detail}") from exc
@@ -615,6 +597,11 @@ class FeishuClient:
         )
 
     def download_resource(self, message_id: str, resource_type: str, key: str, target_dir: Path) -> Path:
+        from attachment_archive import resource_identity, cached_resource, archive_resource
+        identity = resource_identity(message_id, resource_type, key)
+        cached = cached_resource(target_dir, identity)
+        if cached is not None:
+            return cached
         quoted_message = urllib.parse.quote(message_id, safe="")
         quoted_key = urllib.parse.quote(key, safe="")
         url = (
@@ -628,14 +615,13 @@ class FeishuClient:
         )
         with self._open(request) as response:
             body = response.read()
+            expected_length = response.headers.get("Content-Length")
+            if expected_length is not None and str(expected_length).isdigit() and len(body) != int(expected_length):
+                raise GatewayError("Attachment download incomplete; no file or receipt published")
             content_type = response.headers.get("Content-Type", "").split(";", 1)[0]
             disposition = response.headers.get("Content-Disposition", "")
         filename = ""
         if "filename=" in disposition:
             filename = disposition.split("filename=", 1)[1].strip().strip('"')
         suffix = Path(filename).suffix or mimetypes.guess_extension(content_type) or ""
-        safe_key = "".join(char if char.isalnum() or char in "-_" else "_" for char in key)
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target = target_dir / f"{resource_type}-{safe_key[:80]}{suffix}"
-        target.write_bytes(body)
-        return target
+        return archive_resource(target_dir, identity, body, content_type, suffix)

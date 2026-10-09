@@ -223,6 +223,7 @@ class PlatformTests(unittest.TestCase):
                 patch.object(listener_control, "mac_registered", return_value=False),
                 patch.object(listener_control, "REMOTE_STATE", root / "state"),
                 patch.object(listener_control, "_run", side_effect=fake_run),
+            patch.object(listener_control, "request_startup_reconciliation", return_value={"status": "queued"}) as reconcile,
             ):
                 result = listener_control.install_macos()
             payload_text = plist.read_text(encoding="utf-8")
@@ -257,6 +258,7 @@ class PlatformTests(unittest.TestCase):
             patch.object(listener_control, "mac_registered", return_value=True),
             patch.object(listener_control, "mac_domain", return_value="gui/501"),
             patch.object(listener_control, "_run", side_effect=fake_run),
+            patch.object(listener_control, "request_startup_reconciliation", return_value={"status": "queued"}) as reconcile,
         ):
             result = listener_control.start_listener()
 
@@ -266,6 +268,8 @@ class PlatformTests(unittest.TestCase):
             [["launchctl", "kickstart", "gui/501/feishu-codex-remote.listener"]],
         )
         self.assertNotIn("-k", runs[0])
+        reconcile.assert_called_once_with()
+        self.assertEqual(result["startup_reconciliation"]["status"], "queued")
 
     def test_macos_automation_uses_python_wrapper(self):
         with (

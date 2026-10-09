@@ -88,35 +88,80 @@ background notices. Keep existing schedules, notification preferences and domain
 behavior unchanged. Never include raw exceptions or private diagnostics in the
 text file. Notification failure alone must not be called business-task failure.
 
-## Native Capacity And Quota Errors
+## Native Provider Failures
 
 `scripts/provider_failure.py` classifies only the final native JSONL outcome.
 Intermediate errors allow Codex's native retry to finish; a later success wins.
-Terminal `at_capacity` and `rate_limit` return the exact work to Pending, clear
+Terminal `at_capacity`, `rate_limit`, model transport and workspace-routing failures return the exact work to Pending, clear
 Typing, retain its thread and attachments, and consume no ordinary failure attempt.
 The gateway adds no outer provider retries or model switching. A transient internal
 `provider_wait` prevents immediate busy-loop retries; normal startup/reconnect,
 manual or hourly reconciliation clears it even when no new messages are pulled.
 Send one stable, retryable unavailable notice, never a completion mark or resend
-request. Genuine execution failures keep their existing bounded recovery budget;
+request. Authentication failures are identified safely but retain the ordinary
+failure budget: a 401 alone does not prove permanent credential expiry and does
+not introduce an unlimited retry or mandatory manual-unlock policy.
+Genuine execution failures keep their existing bounded recovery budget;
 this rule must not reset them indiscriminately. Pending branches stay resumable,
 not archived. Native retry latency must be explained from actual event evidence.
 
+## Listener Crash And Original Run Ownership
+
+`scripts/run_ownership.py` records the exact batch, run ID, Listener identity,
+launch intent, event/final paths and child PID plus OS creation identity in the
+existing message store. A restart never turns all processing work into Pending.
+The existing control cycle observes surviving original processes; it neither
+starts a duplicate model nor kills a long-running task. Windows process handles,
+macOS libproc start identity and Linux boot/start identity distinguish PID reuse.
+
+An exact live child retains ownership. A stopped original with a verified native
+completion, matching thread and nonempty final artifact may resume the existing
+review/delivery path without another model turn. This is saved as
+`recovered_model_result`, not a review-approved `prepared_reply`. An incomplete
+result preserves its evidence and resumes the existing execution path and budget;
+it must not become a permanent delivery-only retry. A verified prepared reply follows
+the same path. Only a durable claim known not to have submitted a model may resume
+execution. Missing or ambiguous identity/terminal evidence remains outcome-unknown
+for diagnosis; do not manufacture success or blindly replay effects. Main/branch
+identity and maintenance ownership remain intact. Closed admission may safely
+hand off a verified-ready claim during reload; live/unknown/resuming owners still
+block quiescence, and snapshots keep their actual processing status. This adds no runtime deadline,
+retry budget or extra scheduled process.
+
+## Formal Reply Receipts And Attachment Integrity
+
+`scripts/delivery_receipts.py` checkpoints the unchanged answer delivery plan,
+uploaded keys/private document link and remote message IDs on the existing reply
+anchor. Text, all chunks, image/file replies, document links and fallback warnings
+require valid remote receipts. Delivery-only retry skips confirmed parts and keeps
+the original UUID/payload for unconfirmed parts; the model is not rerun. A failed
+send or local checkpoint after document preparation cannot switch the same UUID
+to a different fallback text. Completion requires every planned receipt.
+
+Remote creation and local persistence are not one atomic transaction. A crash
+after a remote effect but before its receipt is saved still depends on Feishu UUID
+deduplication for message retry; upload/document creation has no caller UUID here.
+Reuse saved resource IDs, but do not promise perfect exactly-once remote creation
+or invent receipts for historical deliveries.
+
+`scripts/attachment_archive.py` keeps the current download timing and per-message
+location. Downloads verify declared length, publish complete same-volume temporary
+files without replacing another writer, and store immutable identity/SHA256/size
+receipts. Verified cache works offline. A conflicting or corrupted resource is
+retained as evidence and rejected as model input, not silently overwritten. Old
+unverified files stay available to old run references; they are not trusted as
+verified new downloads. No eager-download policy, new storage service or business
+review gate is added.
+
 ## Persistent Thread Writer Conflicts
 
-Treat an `active writer` or equivalent persistent-thread ownership error as a
-thread diagnostic, not permission to delete or replay the Feishu inbox. Preserve
-the current thread ID, queue state, cursor, run receipt and event log. First
-identify the live owner and determine whether the previous turn is still active,
-stale, or has an unknown outcome. Do not kill an unrelated Codex process, reset
-the cursor, erase message history, or automatically create a replacement thread.
-
-If a replacement thread is necessary, pause admission through the existing
-maintenance lifecycle, retain a recovery copy of the old thread ID and state,
-and require explicit user approval before rebinding the main conversation. Resume
-only the messages whose prior outcome is known not to have completed, then verify
-ordering and reply delivery before reopening admission. This conservative repair
-prevents duplicated side effects and silent loss of conversation continuity.
+Treat a persistent-thread writer conflict as an ownership diagnostic, not permission
+to erase or replay the inbox. Preserve thread ID, queue, cursor and run evidence;
+identify whether the existing owner is active, stale or outcome-unknown. Do not
+kill unrelated processes or automatically replace the conversation. If rebinding
+is necessary, use maintenance, preserve recovery evidence and obtain explicit
+approval before replacing the main thread. Resume only unfinished work after
+checking actual effects and verify ordered reply delivery.
 
 ## Paginated Fork Recovery
 
@@ -192,12 +237,20 @@ python -m unittest discover -s scripts -p "test_*.py"
 | Partial/corrupt/referenced history, concurrent imports, ambiguous outcome | `test_runtime_recovery.py` |
 | Native metadata protocol, timeout/EOF, hidden child process cleanup | `test_codex_thread_fork.py` |
 | Ordinary/hash overlap, duplicate claims, bootstrap, reload | `test_parallel_hash.py` |
-| Quiet window, star barriers, retained source IDs | `test_queue_batching.py` |
+| Native singleton ownership, functional shared health and SDK callback wiring | `test_listener_control.py`, `test_transport_recovery.py`, `test_functional_transport.py` |
+| Durable per-group reconciliation, realtime/history race and component recovery | `test_catchup_health.py` |
+| Startup/running DNS outage and endpoint 503: automatic connection, fresh application PONG, durable catch-up and unchanged live work without manual wake-up | `test_network_flap_recovery.py` (real local HTTP/WebSocket/protobuf; fixture-only shortened SDK cadence) |
+| Dead worker recovery, active owner preservation and unknown outcomes | `test_worker_health.py` |
+| Quiet window, leading/trailing star barriers, hash priority, attachments and retained source IDs | `test_queue_batching.py` and `test_star_separators.py` |
 | Maintenance arrival/stop/restart/notice retry; temporary cleanup | `test_gateway_lifecycle.py` |
 | Checkpoint/communication exceptions, stop failure, real hidden child reaping and subsequent execution | `test_gateway_lifecycle.py` |
 | Partial result, prepared reply replay, late failure, acceptance evidence and notification receipts | `test_task_contract.py` |
 | Failure reactions, schema errors, original-task resolution, no-source notices, crash/restart and stale evidence | `test_generic_recovery.py` |
 | Wording-preserving delivery, declared omissions and prior review handoff (transport only) | `test_generic_recovery.py` |
+| Listener death with live child, PID reuse, ambiguous outcome, retained final, main/branch and maintenance | `test_run_ownership.py` |
+| Terminal model network/routing/authentication classification and native subprocess replay | `test_provider_failure.py`, `test_provider_transport_failure.py`, `test_provider_worker_recovery.py` |
+| Partial reply receipts, lost local completion, media/document/fallback and restart without model replay | `test_delivery_receipts.py` |
+| Real local HTTP short read, offline attachment reuse, concurrent immutable publication and corruption | `test_attachment_archive.py` |
 | Delivery, attachments, scope, context bridge and existing policies | `test_remote_gateway.py` and edition-specific tests |
 
 Use isolated temporary fixtures. Distinguish simulated model/Feishu tests from
@@ -265,7 +318,12 @@ hosts report Windows-specific skips, not Windows acceptance.
 
 The Windows launch chain uses a demand-only Task Scheduler action pointing to
 `pythonw.exe supervisor.py`, with hidden children and durable diagnostic output.
-Do not substitute direct worker launch after an access-denied error. Retain exact
+The sync/reload wrappers share `windowless_process.ps1` and wait for the actual
+child output/exit status. A native process-lifetime lease also excludes consumers
+started outside Task Scheduler; duplicate `run` must exit before opening workers.
+The Windows and macOS SessionStart entrypoints queue all bound groups for startup reconciliation even if the launcher is already running. Ordinary sync asks gateway_transport.Client for a fresh same-generation Feishu application PONG, then checks worker/component ownership and retained catch-up failures. Successful REST history alone cannot acknowledge functional health. `transport-health.json` is PID- and timestamp-bound diagnostic evidence of that check; an old receipt is not current health and even a fresh application PONG is not full user-message/model/reply proof.
+SDK reconnect callbacks request asynchronous history reconciliation for all groups,
+independently of hourly opt-outs. Do not substitute direct worker launch after an access-denied error. Retain exact
 launcher ownership checks and one shared consumer. Repeated starts must preserve
 active work; macOS kickstart must not use the destructive `-k` option.
 
@@ -295,3 +353,24 @@ Document live vs simulated coverage and platform limits. Updating package code
 alone must not rewrite existing project Automations, models, permissions,
 reporting modes or domain-owned systems. Source changes to provisioning defaults
 apply to new registrations, not retroactive enforcement on existing projects.
+
+### Functional reception recovery
+
+`gateway_transport.py` adapts pinned lark-oapi without editing its installation. Endpoint discovery runs off-loop with the existing gateway HTTP connect/read inactivity timeout; this is not a DNS/total wall-clock guarantee. Application PING/PONG verification uses the existing WebSocket Pong budget and the server heartbeat/reconnect cadence. Only one receiver and reconnect owner operate per connection generation. Durable event callbacks complete before ACK; a callback from an old connection cannot ACK onto a replacement.
+
+`gateway_recovery.py` retains per-project catch-up intent in `catchup-recovery.json`. Only complete history pagination plus durable enqueue commits the existing history cursor. Realtime arrivals never advance it. One failed group does not discard other groups or consume recovery intent; an in-flight scan cannot erase a newer reconnect revision. Retry cadence follows the SDK, without a second automation or consumer.
+
+Existing control polling supervises worker ownership. Dead workers reuse their Store and queue, while live main/branch tasks stay intact. A processing message with no live owner is reported as outcome_unknown, not automatically replayed. Auxiliary startup reaction repair still precedes that project worker startup; its failure now always releases startup, and it does not block other projects or the shared receiver. Slow live business calls are not killed solely for elapsed time.
+
+
+### Shared core for independent Listeners
+
+`gateway_transport.py`, `gateway_recovery.py` and `gateway_primitives.py` form the generic transport/recovery source. The primitives module owns the existing HTTP connect/read inactivity timeout and atomic JSON helpers; importing this core must not load a project registry, credentials, user directories or business workers. `gateway_common` retains its existing public helper names by re-exporting them.
+
+Independent Listeners may deploy the same verified core as a fixed-version managed copy with its upstream source, version and SHA256 manifest. Treat the selected Skill as the authoritative generic implementation: return generic fixes here and selectively port to the public edition, then update consumers through their own validation and safe deployment. Do not dynamically load an unverified editing tree or maintain a second divergent SDK repair. Each consumer retains its own singleton, configuration, credentials, durable state, queue, admission rules and domain logic.
+
+The thin project adapter wires reconnect callbacks to durable catch-up intent and wakes its existing recovery/worker loop. Only full history pagination and durable message/resource acceptance may acknowledge that revision; a normal return containing failed records is not complete recovery. A newer reconnect during an in-flight pull must remain pending. Maintenance may continue reception and catch-up while admission still prevents model execution. Keep the SDK/server reconnect cadence and the existing project execution rules.
+
+Acceptance must run the common real local HTTP/WebSocket/protobuf transport scenarios against the deployed core and verify the consumer's own callbacks, persistence and admission adapter. Shared Store fixtures alone do not prove an independent consumer. Check startup and running DNS failure, endpoint failure, fresh application PONG, receiver death, generation-isolated ACK/PONG, partial catch-up failure, repeated reconnect during catch-up, and no duplicate work or new model launch during closed admission. Record each consumer's source hashes, SDK versions, isolated results and live receipt separately.
+
+Catch-up completion uses publish-before-clear: a failed state write retains the pending revision in memory and on disk. A newly requested intent that cannot be written remains visible as desired work in memory and the error propagates; it must not be labeled durable. The adapter must wake its existing recovery loop in a finally block even on that failure, so it retries through the established cadence without a manual poke. Restart still performs the existing unconditional startup reconciliation; an unsuccessful disk write cannot guarantee persistence through a process crash. See `test_recovery_commit.py` and the failed-request wakeup case in `test_catchup_health.py`.

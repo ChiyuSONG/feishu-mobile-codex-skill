@@ -32,7 +32,7 @@ class QuietWindowTests(unittest.TestCase):
         marker['content']=json.dumps({'content':[[{'tag':'text','text':'*'}]]})
         self.assertEqual([r['message_id'] for r in choose([marker],100)[0]],['m'])
         marker['content']=json.dumps({'content':[[{'tag':'text','text':'*'},{'tag':'img','image_key':'image'}]]})
-        self.assertEqual(choose([marker],100),([],15))
+        self.assertEqual([row["message_id"] for row in choose([marker],100)[0]],["m"])
     def test_empty_star_flushes_then_completes_without_model(self):
         rows=[item('a',100),item('flush',110,' * '),item('b',120)]
         self.assertEqual([r['message_id'] for r in choose(rows,120)[0]],['a'])

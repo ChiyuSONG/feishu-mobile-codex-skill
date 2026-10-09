@@ -4,14 +4,21 @@ from task_contract import (EXECUTION_CONTRACT, IncompleteTask, failure_text,
                            extract_transport_outcome, recovery_context as original_recovery_context,
                            verified_resolutions)
 
-from queue_batching import QUIET_WINDOW_SECONDS, select_pending
+from queue_batching import QUIET_WINDOW_SECONDS, select_pending, star_boundaries
+from run_ownership import RunOwnershipStore
 from codex_thread_fork import archive_thread, fork_thread, start_thread
-from provider_failure import ProviderCapacityError, terminal_capacity_failure, terminal_provider_failure
+from provider_failure import (ProviderCapacityError, ProviderFailureError, terminal_capacity_failure,
+                              terminal_provider_failure, provider_failure_is_deferred, provider_failure_reason)
 from gateway_lifecycle import LifecycleStore, LifecycleWorker, MaintenancePaused, MaintenanceStopFailed, run_model_process
 from project_profiles import PATROL_DEFAULTS, initial_profiles, source_task_profile
 from command_invocation import exec_spec
 
+from listener_control import listener_lease
+from gateway_recovery import CatchupRecovery
+from delivery_receipts import ReplyRouting, deliver_reply, remaining_artifact_failures
+
 import argparse
+import asyncio
 from contextlib import ExitStack
 from datetime import datetime
 import hashlib
@@ -535,7 +542,7 @@ def ignore_message(message: dict[str, Any]) -> bool:
     return sender_type in {"app", "bot", "system"} or message_type == "system"
 
 
-class ProjectStore(LifecycleStore):
+class ProjectStore(RunOwnershipStore, LifecycleStore):
     def __init__(self, project_key: str) -> None:
         self.project_key = project_key
         self.root = project_runtime(project_key)
@@ -564,9 +571,6 @@ class ProjectStore(LifecycleStore):
             return False
         create_time = int(str(message.get("create_time") or "0") or 0)
         if ignore_message(message):
-            with self.lock:
-                self.state["cursor"] = max(int(self.state.get("cursor") or 0), create_time // 1000)
-                self.save()
             return False
         sender = message.get("sender") or {}
         with self.lock:
@@ -586,7 +590,8 @@ class ProjectStore(LifecycleStore):
             }
             if self.pause_requested():
                 self._defer(items[message_id])
-            self.state["cursor"] = max(int(self.state.get("cursor") or 0), create_time // 1000)
+            # History pagination alone owns cursor; realtime arrivals may be newer
+            # than messages still awaiting reconnect reconciliation.
             self.save()
         return True
 
@@ -599,20 +604,23 @@ class ProjectStore(LifecycleStore):
                         item["status"] = "ignored"
                         item["ignored_at"] = now_iso()
                         changed = True
-                elif item.get("status") == "processing" and self.pause_requested([item["message_id"]]):
-                    item["maintenance_stop_error"] = "Listener interrupted; stopping has not been confirmed"
-                    changed = True
+                elif item.get("status") == "processing":
+                    # A listener crash does not prove that its model child exited.
+                    # Reconcile exact process/run identity below before any reuse.
+                    if self.pause_requested([item["message_id"]]):
+                        item["maintenance_stop_error"] = "Listener interrupted; stopping has not been confirmed"
+                        changed = True
+                    continue
                 elif item.get("status") in {"pending", "failed"} and self.pause_requested([item["message_id"]]):
                     self._defer(item)
                     changed = True
-                elif item.get("status") == "processing" or (
-                    item.get("status") == "pending" and int(item.get("attempts") or 0) >= 3
-                ):
+                elif item.get("status") == "pending" and int(item.get("attempts") or 0) >= 3:
                     item["status"] = "failed" if int(item.get("attempts") or 0) >= 3 else "pending"
                     item["recovered_at"] = now_iso()
                     changed = True
             if changed:
                 self.save()
+            self.reconcile_runs()
 
     def next_pending(self, *, quiet_window_seconds: float = QUIET_WINDOW_SECONDS) -> dict[str, Any] | None:
         batch = self.next_pending_batch(max_messages=1, quiet_window_seconds=quiet_window_seconds)
@@ -628,6 +636,9 @@ class ProjectStore(LifecycleStore):
         with self.lock:
             if not self.admission_open or self.pause_requested() or self.state.get("main_bootstrap_state") == "outcome_unknown":
                 return []
+            recovered = self.take_recovered_run()
+            if recovered:
+                return recovered
             selected, _delay = select_pending(
                 list(self.state.get("messages", {}).values()),
                 forced_single_message, explicit_routing_mode,
@@ -646,6 +657,7 @@ class ProjectStore(LifecycleStore):
                 item["attempts"] = int(item.get("attempts") or 0) + 1
                 item["processing_started_at"] = started_at
                 item["batch_id"] = batch_id
+            self.claim_run([str(item["message_id"]) for item in selected])
             self.save()
             return [dict(item) for item in selected]
 
@@ -730,10 +742,18 @@ def normalize_history_message(message: dict[str, Any]) -> dict[str, Any]:
 
 
 def without_forced_marker(item: dict[str, Any]) -> str:
-    text = message_text(item.get("content"))
-    stripped = text.lstrip()
-    if stripped.startswith(("*", "#")):
+    # Project transport controls once, leaving the durable source untouched.
+    stripped = message_text(item.get("content")).strip()
+    if stripped.startswith("#"):
         stripped = stripped[1:].lstrip()
+    elif stripped.startswith("*") and any(
+        char != "*" and not char.isspace() for char in stripped
+    ):
+        stripped = stripped[1:].lstrip()
+    # Pure multiple-star payloads keep their existing one-star consumption;
+    # only the original bare single star is a no-model flush in the worker.
+    if stripped.endswith("*"):
+        stripped = stripped[:-1].rstrip()
     return stripped
 
 
@@ -747,7 +767,8 @@ def normalized_user_text(item: dict[str, Any]) -> str:
 
 
 def forced_single_message(item: dict[str, Any]) -> bool:
-    return message_text(item.get("content")).lstrip().startswith("*")
+    # Compatibility name: a leading star starts a topic, not necessarily one message.
+    return star_boundaries(item)[0]
 
 
 def parallel_message(item: dict[str, Any]) -> bool:
@@ -815,18 +836,6 @@ def project_permission_mode(project: dict[str, Any]) -> str:
 
 def hourly_catch_up_project_keys(workers: dict[str, Any]) -> list[str]:
     return [key for key, worker in workers.items() if project_hourly_catch_up_enabled(worker.project)]
-
-
-def scheduled_catch_up_project_keys(workers: dict[str, Any], *, reconnected: bool) -> list[str]:
-    return list(workers) if reconnected else hourly_catch_up_project_keys(workers)
-
-
-def attach_reconnect_reconciliation(client: Any, signal: threading.Event) -> bool:
-    """Wake the non-blocking reconciliation worker after an SDK reconnect."""
-    if not hasattr(client, "on_reconnected"):
-        return False
-    client.on_reconnected = signal.set
-    return True
 
 
 def build_prompt(
@@ -990,6 +999,7 @@ def run_codex(project_key: str, project: dict[str, Any], store: ProjectStore, it
     message_ids = [str(value) for value in (item.get("batch_message_ids") or [item.get("message_id")]) if value]
     store.record_run(message_ids, event_log)
     thread_id = str(item.get("branch_thread_id") or store.thread_id())
+    store.prepare_run(message_ids, event_log, thread_id)
     command = build_codex_command(project, final_path, attachments, thread_id)
     prompt = build_prompt(
         project_key,
@@ -1023,7 +1033,8 @@ def run_codex(project_key: str, project: dict[str, Any], store: ProjectStore, it
     if provider_failure:
         if new_thread_id and not item.get("branch_thread_id"):
             store.set_thread_id(new_thread_id)
-        raise ProviderCapacityError(event_log, provider_failure)
+        error_type = ProviderCapacityError if provider_failure in {"at_capacity", "rate_limit"} else ProviderFailureError
+        raise error_type(event_log, provider_failure)
     if result.returncode != 0:
         raise GatewayError(f"Codex exited with code {result.returncode}; log={event_log}")
     if not new_thread_id:
@@ -1125,7 +1136,7 @@ def publish_document(project: dict[str, Any], source: Path, artifacts: list[Path
     command = [sys.executable, str(PUBLISHER), "publish", "--title", title, "--source", str(source)]
     for artifact in artifacts or []:
         command.extend(["--embed", str(artifact)])
-    result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600, check=False)
+    result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600, check=False, creationflags=CREATE_NO_WINDOW)
     if result.returncode != 0:
         raise GatewayError(f"Feishu document publish failed: {result.stdout}\n{result.stderr}")
     payload = json.loads(result.stdout)
@@ -1428,109 +1439,37 @@ def send_default_inspection_message(config: dict[str, Any], project_key: str) ->
     return send_routine_inspection_message(config, project_key)
 
 
-def upload_inline_images(
-    client: FeishuClient,
-    artifacts: list[Path],
-    allowed_root: str | Path,
-    log_path: Path,
-) -> tuple[list[tuple[Path, str]], list[Path]]:
-    uploaded: list[tuple[Path, str]] = []
-    failed: list[Path] = []
-    for artifact in artifacts:
-        if artifact.suffix.lower() not in IMAGE_ARTIFACT_SUFFIXES:
-            continue
-        try:
-            uploaded.append((artifact, client.upload_message_image(artifact, allowed_root)))
-        except Exception:
-            failed.append(artifact)
-            append_log(log_path, f"direct image upload failed for {artifact}:\n" + traceback.format_exc())
-    return uploaded, failed
-
-
-def reply_inline_images(
-    client: FeishuClient,
-    message_id: str,
-    uploaded: list[tuple[Path, str]],
-    base_uuid: str,
-    log_path: Path,
-) -> list[Path]:
-    failed: list[Path] = []
-    for index, (artifact, image_key) in enumerate(uploaded, start=1):
-        try:
-            client.reply_image(message_id, image_key, f"{base_uuid[:35]}-img-{index}")
-        except Exception:
-            failed.append(artifact)
-            append_log(log_path, f"direct image reply failed for {artifact}:\n" + traceback.format_exc())
-    return failed
-
-
-def upload_inline_files(
-    client: FeishuClient,
-    artifacts: list[Path],
-    allowed_root: str | Path,
-    log_path: Path,
-) -> tuple[list[tuple[Path, str]], list[Path]]:
-    uploaded: list[tuple[Path, str]] = []
-    failed: list[Path] = []
-    for artifact in artifacts:
-        if artifact.suffix.lower() not in NATIVE_MESSAGE_FILE_SUFFIXES:
-            continue
-        try:
-            uploaded.append((artifact, client.upload_message_file(artifact, allowed_root)))
-        except Exception:
-            failed.append(artifact)
-            append_log(log_path, f"direct file upload failed for {artifact}:\n" + traceback.format_exc())
-    return uploaded, failed
-
-
-def reply_inline_files(
-    client: FeishuClient,
-    message_id: str,
-    uploaded: list[tuple[Path, str]],
-    base_uuid: str,
-    log_path: Path,
-) -> list[Path]:
-    failed: list[Path] = []
-    for index, (artifact, file_key) in enumerate(uploaded, start=1):
-        try:
-            client.reply_file(message_id, file_key, f"{base_uuid[:35]}-file-{index}")
-        except Exception:
-            failed.append(artifact)
-            append_log(log_path, f"direct file reply failed for {artifact}:\n" + traceback.format_exc())
-    return failed
-
-
-def send_artifact_warning(
-    client: FeishuClient,
-    project: dict[str, Any],
-    failed: list[Path],
-    base_uuid: str,
-    log_path: Path,
-) -> None:
-    if not failed:
-        return
-    names = "、".join(path.name for path in failed[:5])
-    if len(failed) > 5:
-        names += f" 等 {len(failed)} 个文件"
+def reply_presentation(project, answer, document, texts, failed):
+    """Retain release language and attachment warnings around the exact answer."""
     english = project_language(project) == "en"
-    text = (
-        f"Some attachments were not delivered ({names}). Ask Codex to retry and confirm that the attachment appears before relying on it."
-        if english
-        else f"部分附件未送达（{names}）。请让 Codex 重试，并在确认附件实际出现后再使用。"
-    )
-    try:
-        client.send_post(project["chat_id"], text, f"{base_uuid[:35]}-artifact-warn")
-    except Exception:
-        append_log(log_path, "artifact warning delivery failed:\n" + traceback.format_exc())
-
-
-def remaining_artifact_failures(failed: list[Path], delivered: list[dict[str, str]]) -> list[Path]:
-    delivered_names = {
-        str(item.get("name") or "").strip().casefold()
-        for item in delivered
-        if str(item.get("url") or "").startswith("http")
-    }
-    return [path for path in failed if path.name.casefold() not in delivered_names]
+    if document is not None:
+        fallback = "The complete result is ready" if english else "完整结果已整理"
+        label = "Open the full Feishu document" if english else "打开完整飞书文档"
+        summary = next((line.strip("# ") for line in answer.splitlines() if line.strip()), fallback)
+        text = f"{summary[:240]}\n\n[{label}]({document['document_url']})"
+        artifacts = document.get("artifacts") or []
+        if artifacts:
+            heading = "Attachments" if english else "附件与产物"
+            links = [f"[{artifact['name']}]({artifact['url']})" for artifact in artifacts]
+            text += f"\n\n{heading}：" + " · ".join(links)
+        if failed:
+            names = "、".join(path.name for path in failed[:5])
+            notice = (f"Attachments were not delivered ({names}); the document and text result are still available."
+                      if english else f"附件未送达（{names}）；飞书文档和文字结果仍可查看。")
+            text = notice + "\n\n" + text
+        texts = [text]
+    else:
+        # The module's default preparation warning is edition-specific. The
+        # release keeps its established bilingual prefix for every upload failure.
+        texts = chunks(answer)
+        if failed:
+            names = "、".join(path.name for path in failed[:5])
+            prefix = (f"Attachments were not delivered ({names}); the text result follows.\n\n"
+                      if english else f"附件未送达（{names}）；以下仅返回文字结果。\n\n")
+            texts[0] = prefix + texts[0]
+    # Preparation failures are already visible in the first receipted message.
+    # Native send failures are retried from their durable plan, never swallowed.
+    return texts, []
 
 
 def reply_complete(
@@ -1540,90 +1479,23 @@ def reply_complete(
     answer: str,
     final_path: Path,
     log_path: Path,
+    *,
+    store: ProjectStore,
 ) -> str:
-    source = message_text(item.get("content"))
-    message_id = item["message_id"]
-    base_uuid = "codex-remote-" + hashlib.sha256(message_id.encode("utf-8")).hexdigest()[:32]
-    allowed_root = project.get("working_directory") or final_path.parent
-    artifacts = extract_local_artifacts(answer, allowed_root)
-    uploaded_images, image_upload_failures = upload_inline_images(
-        client,
-        artifacts,
-        allowed_root,
-        log_path,
-    )
-    uploaded_files, file_upload_failures = upload_inline_files(
-        client,
-        artifacts,
-        allowed_root,
-        log_path,
-    )
-    if should_publish_document(source, answer):
+    def publish_with_log(project, source, artifacts):
         try:
-            published = publish_document(project, final_path, artifacts)
-            link = str(published["document_url"])
-            english = project_language(project) == "en"
-            fallback = "The complete result is ready" if english else "完整结果已整理"
-            label = "Open the full Feishu document" if english else "打开完整飞书文档"
-            summary = next((line.strip("# ") for line in answer.splitlines() if line.strip()), fallback)
-            text = f"{summary[:240]}\n\n[{label}]({link})"
-            fallback_artifacts = published.get("artifacts") or []
-            if fallback_artifacts:
-                artifact_label = "Attachments" if english else "附件与产物"
-                lines = [f"[{item['name']}]({item['url']})" for item in fallback_artifacts]
-                text += f"\n\n{artifact_label}：" + " · ".join(lines)
-            known_missing = remaining_artifact_failures(
-                image_upload_failures + file_upload_failures,
-                fallback_artifacts,
-            )
-            if known_missing:
-                names = "、".join(path.name for path in known_missing[:5])
-                notice = (
-                    f"Attachments were not delivered ({names}); the document and text result are still available."
-                    if english
-                    else f"附件未送达（{names}）；飞书文档和文字结果仍可查看。"
-                )
-                text = notice + "\n\n" + text
-            client.reply_post(message_id, text, base_uuid)
-            image_reply_failures = reply_inline_images(client, message_id, uploaded_images, base_uuid, log_path)
-            file_reply_failures = reply_inline_files(client, message_id, uploaded_files, base_uuid, log_path)
-            failed_artifacts = remaining_artifact_failures(
-                image_reply_failures + file_reply_failures,
-                fallback_artifacts,
-            )
-            send_artifact_warning(
-                client,
-                project,
-                failed_artifacts,
-                base_uuid,
-                log_path,
-            )
-            return link
-        except Exception:
-            append_log(log_path, "document publish failed; falling back to message chunks:\n" + traceback.format_exc())
-    parts = chunks(answer)
-    upload_failures = image_upload_failures + file_upload_failures
-    if upload_failures:
-        names = "、".join(path.name for path in upload_failures[:5])
-        warning = (
-            f"Attachments were not delivered ({names}); the text result follows.\n\n"
-            if project_language(project) == "en"
-            else f"附件未送达（{names}）；以下仅返回文字结果。\n\n"
-        )
-        parts[0] = warning + parts[0]
-    client.reply_post(message_id, parts[0], base_uuid)
-    image_reply_failures = reply_inline_images(client, message_id, uploaded_images, base_uuid, log_path)
-    file_reply_failures = reply_inline_files(client, message_id, uploaded_files, base_uuid, log_path)
-    send_artifact_warning(
-        client,
-        project,
-        image_reply_failures + file_reply_failures,
-        base_uuid,
-        log_path,
+            return publish_document(project, source, artifacts)
+        except Exception as exc:
+            append_log(log_path, f"document publish failed; falling back to message chunks: {type(exc).__name__}")
+            raise
+    return deliver_reply(
+        client, project, item, answer, final_path, store=store,
+        routing=ReplyRouting(
+            extract_local_artifacts, lambda source, text, _project: should_publish_document(source, text),
+            publish_with_log, chunks, IMAGE_ARTIFACT_SUFFIXES, NATIVE_MESSAGE_FILE_SUFFIXES,
+            presentation=reply_presentation,
+        ),
     )
-    for index, part in enumerate(parts[1:], start=2):
-        client.send_post(project["chat_id"], part, f"{base_uuid}-{index}")
-    return ""
 
 
 class ProjectWorker(LifecycleWorker):
@@ -1640,16 +1512,121 @@ class ProjectWorker(LifecycleWorker):
         self.signal = threading.Event()
         self.branch_signal = threading.Event()
         self.active_branches: dict[str, threading.Thread] = {}
+        self._worker_threads_lock = threading.RLock()
+        self._worker_states: dict[str, str] = {}
+        self._worker_errors: dict[str, dict[str, str]] = {}
+        self._active_main_thread: threading.Thread | None = None
         self.init_lifecycle()
-        self.branch_thread = threading.Thread(target=self._parallel_loop, name=f"branches-{key}", daemon=True)
-        self.thread = threading.Thread(target=self._loop, name=f"worker-{key}", daemon=True)
+        self.lifecycle_thread = None
+        self.branch_thread = self._new_worker_thread("branch_dispatch", self._parallel_loop)
+        self.thread = self._new_worker_thread("main", self._loop)
+
+    def _new_worker_thread(self, lane, target):
+        return threading.Thread(target=self._worker_entry, args=(lane, target),
+                                name=f"{lane}-{self.key}", daemon=True)
+
+    def _worker_error(self, lane, detail):
+        # Retain diagnostics even if the original failure was a filesystem error.
+        with self._worker_threads_lock:
+            self._worker_states[lane] = "error"
+            self._worker_errors[lane] = {"at": now_iso(), "traceback": detail}
+        try:
+            append_log(self.log_path, f"worker component failed {self.key}:{lane}:\n{detail}")
+        except Exception:
+            with self._worker_threads_lock:
+                self._worker_errors[lane]["diagnostic_write_error"] = traceback.format_exc()
+
+    def _worker_ready(self, lane, state="waiting"):
+        with self._worker_threads_lock:
+            self._worker_states[lane] = state
+            self._worker_errors.pop(lane, None)
+
+    def _worker_entry(self, lane, target, *args):
+        try:
+            target(*args)
+        except BaseException:
+            # SystemExit also kills only this thread. The existing service monitor
+            # may replace it after is_alive() is false; no message is requeued here.
+            self._worker_error(lane, traceback.format_exc())
+        else:
+            if lane == "lifecycle" and self.lifecycle_stop.is_set():
+                with self._worker_threads_lock:
+                    self._worker_states[lane] = "stopped"
+            elif not lane.startswith("branch:"):
+                self._worker_error(lane, "Worker loop returned unexpectedly")
+
+    def _ensure_worker_thread(self, lane, attribute, target, signal):
+        with self._worker_threads_lock:
+            thread = getattr(self, attribute, None)
+            if thread is not None and thread.is_alive():
+                return thread
+            if thread is None or thread.ident is not None:
+                thread = self._new_worker_thread(lane, target)
+                setattr(self, attribute, thread)
+            self._worker_states[lane] = "starting"
+            try:
+                thread.start()
+                signal.set()
+            except Exception:
+                self._worker_error(lane, traceback.format_exc())
+            return thread
+
+    def start_lifecycle(self):
+        # A repeated start must not create competing notice/archive consumers.
+        if self.lifecycle_stop.is_set():
+            return self.lifecycle_thread
+        return self._ensure_worker_thread("lifecycle", "lifecycle_thread",
+                                          self._lifecycle_loop, self.lifecycle_signal)
+
+    def ensure_worker_threads(self):
+        """Repair only thread ownership, retaining this worker, store and claims."""
+        with self.store.lock:
+            active = [mid for mid, thread in self.active_branches.items() if thread.is_alive()]
+            if self._active_main_thread is not None and self._active_main_thread.is_alive():
+                active.extend(mid for mid, row in self.store.state.get("messages", {}).items()
+                              if row.get("status") == "processing" and not parallel_message(row))
+        if self.store.reconcile_runs(active):
+            self.signal.set()
+            self.branch_signal.set()
+        self.start_lifecycle()
+        self._ensure_worker_thread("main", "thread", self._loop, self.signal)
+        self._ensure_worker_thread("branch_dispatch", "branch_thread",
+                                   self._parallel_loop, self.branch_signal)
+        return self.worker_health()
+
+    def worker_health(self):
+        with self._worker_threads_lock:
+            threads = {lane: {"alive": bool(thread and thread.is_alive()),
+                              "state": self._worker_states.get(lane, "not_started")}
+                       for lane, thread in (("main", self.thread),
+                                            ("branch_dispatch", self.branch_thread),
+                                            ("lifecycle", self.lifecycle_thread))}
+            errors = {lane: dict(error) for lane, error in self._worker_errors.items()}
+        # Do not hold the thread lock while acquiring the queue lock: dispatch
+        # and message completion also report health from inside queue operations.
+        with self.store.lock:
+            unknown = []
+            for mid, row in self.store.state.get("messages", {}).items():
+                if row.get("status") != "processing":
+                    continue
+                owner = (self.active_branches.get(mid) if parallel_message(row)
+                         else self._active_main_thread)
+                if owner is None or not owner.is_alive():
+                    if row.get("run_recovery") not in {"waiting", "ready"}:
+                        unknown.append(mid)
+            active_branches = {mid: thread.is_alive() for mid, thread in self.active_branches.items()}
+            recovered_runs = {mid: row.get("run_recovery") for mid, row in
+                              self.store.state.get("messages", {}).items() if row.get("run_recovery")}
+        errors = {lane: error for lane, error in errors.items()
+                  if not lane.startswith("branch:") or lane[len("branch:"):] in unknown}
+        healthy = (all(value["alive"] and value["state"] not in {"starting", "error"}
+                       for value in threads.values()) and not unknown)
+        return {"healthy": healthy, "threads": threads, "outcome_unknown": unknown,
+                "active_branches": active_branches, "errors": errors,
+                "recovered_runs": recovered_runs}
 
     def start(self) -> None:
-        self.start_lifecycle()
-        self.thread.start()
-        self.branch_thread.start()
-        self.branch_signal.set()
-        self.signal.set()
+        self.ensure_worker_threads()
 
     def enqueue(self, message: dict[str, Any]) -> bool:
         added = self.store.enqueue(message)
@@ -1723,31 +1700,38 @@ class ProjectWorker(LifecycleWorker):
             )
             for row in rows:
                 message_id = str(row["message_id"])
+                recovered = (row.get("status") == "processing" and row.get("run_recovery") == "ready")
                 if (not parallel_message(row) or message_id in self.active_branches
                         or row.get("provider_wait")
-                        or row.get("status") not in {"pending", "failed"}
-                        or int(row.get("attempts") or 0) >= 3
+                        or (not recovered and row.get("status") not in {"pending", "failed"})
+                        or (not recovered and int(row.get("attempts") or 0) >= 3)
                         or row.get("branch_state") == "fork_outcome_unknown"):
                     continue
                 try:
-                    parent = str(row.get("branch_parent_thread_id") or self._branch_parent())
+                    parent = str(row.get("branch_parent_thread_id") or
+                                 (self.store.thread_id() if recovered else self._branch_parent()))
                 except Exception as exc:
                     row.update(status="failed", attempts=int(row.get("attempts") or 0) + 1, error=str(exc))
                     self.store.save()
                     append_log(self.log_path, f"branch parent unavailable {self.key}:{message_id}: {exc}")
                     self._report_branch_failure(message_id)
                     continue
-                if not parent:
+                if not parent and not recovered:
                     continue
                 previous = dict(row)
-                row.update(
-                    status="processing", attempts=int(row.get("attempts") or 0) + 1,
-                    processing_started_at=now_iso(), batch_id="branch-" + hashlib.sha256(message_id.encode()).hexdigest()[:24],
-                    branch_parent_thread_id=parent,
-                )
-                self.store.save()
+                if recovered:
+                    if not self.store.take_recovered_run(branch=True, message_id=message_id):
+                        continue
+                else:
+                    row.update(
+                        status="processing", attempts=int(row.get("attempts") or 0) + 1,
+                        processing_started_at=now_iso(), batch_id="branch-" + hashlib.sha256(message_id.encode()).hexdigest()[:24],
+                        branch_parent_thread_id=parent,
+                    )
+                    self.store.claim_run([message_id])
+                    self.store.save()
                 thread = threading.Thread(
-                    target=self._run_parallel, args=(dict(row),),
+                    target=self._worker_entry, args=("branch:" + message_id, self._run_parallel, dict(row)),
                     name=f"branch-{self.key}-{message_id}", daemon=True,
                 )
                 self.active_branches[message_id] = thread
@@ -1768,7 +1752,7 @@ class ProjectWorker(LifecycleWorker):
             if self.store.pause_requested([message_id]):
                 self.store.defer_batch([message_id])
                 return
-            child = str(item.get("branch_thread_id") or "")
+            child = str(item.get("branch_thread_id") or (item.get("prepared_reply") or {}).get("thread_id") or "")
             if not child:
                 codex_path = codex_cli_path()
                 # Record ambiguity before the RPC; a crash or timeout must not
@@ -1865,12 +1849,29 @@ class ProjectWorker(LifecycleWorker):
 
     def _parallel_loop(self) -> None:
         while True:
-            self.branch_signal.wait(timeout=1.0)
-            self.branch_signal.clear()
             try:
+                self.branch_signal.wait(timeout=1.0)
+                self.branch_signal.clear()
                 self.dispatch_parallel()
+                self._worker_ready("branch_dispatch")
             except Exception:
-                append_log(self.log_path, "branch dispatch failed: " + traceback.format_exc())
+                self._worker_error("branch_dispatch", traceback.format_exc())
+
+    def _lifecycle_loop(self):
+        from gateway_lifecycle import RETRY_SECONDS
+        while not self.lifecycle_stop.is_set():
+            try:
+                self.lifecycle_signal.wait(timeout=RETRY_SECONDS)
+                self.lifecycle_signal.clear()
+                self.deliver_lifecycle_notices()
+                self.reconcile_failure_reactions()
+                self.reconcile_branch_archives()
+                self._worker_ready("lifecycle")
+            except Exception as exc:
+                self._worker_error("lifecycle", traceback.format_exc())
+                with self.store.lock:
+                    self.store.state["lifecycle_error"] = str(exc)
+                    self.store.save()
 
     def _download_attachments(self, item: dict[str, Any]) -> list[Path]:
         target = self.store.root / "attachments" / item["message_id"]
@@ -1962,8 +1963,8 @@ class ProjectWorker(LifecycleWorker):
                 continue
             if item.get("control_action") == "flush_previous_batch":
                 continue
-            # Reuse durable successful projections; incomplete/error receipts
-            # still reconcile. A restart need not reread every historical reply.
+            # Successful delivery and reaction receipts survive restarts. Only
+            # incomplete projections need network reconciliation at startup.
             if (status == "completed" and item.get("completion_reaction_id")
                     and item.get("working_reaction_active") is False
                     and not item.get("failure_reaction_active")
@@ -2002,6 +2003,7 @@ class ProjectWorker(LifecycleWorker):
                         reaction_id = str(reaction.get("reaction_id") or "")
                         if reaction_id:
                             self.client.remove_reaction(message_id, reaction_id)
+                self.store.update_message(message_id, reaction_sync_error=None, working_reaction_active=False)
             except Exception as exc:
                 self.store.update_message(message_id, reaction_sync_error=str(exc))
                 append_log(self.log_path, f"reaction reconciliation failed for {message_id}: {exc}")
@@ -2028,7 +2030,9 @@ class ProjectWorker(LifecycleWorker):
                 self.store.finish(message_ids[0], "completed", completed_at=now_iso(),
                                   control_action="flush_previous_batch")
                 return
-            attachments = [path for item in items for path in self._download_attachments(item)]
+            receipt = self.store.state["messages"][message_ids[0]].get("prepared_reply")
+            recovered_result = self.store.state["messages"][message_ids[0]].get("recovered_model_result")
+            attachments = [] if (receipt or recovered_result) else [path for item in items for path in self._download_attachments(item)]
             for item in items:
                 message_id = str(item["message_id"])
                 try:
@@ -2038,8 +2042,8 @@ class ProjectWorker(LifecycleWorker):
                     append_log(self.log_path, f"ack reaction failed for {message_id}: {exc}")
             phase = "execution"
             receipt = self.store.state["messages"][message_ids[0]].get("prepared_reply")
-            if receipt:
-                answer, thread_id, final_path = restore_result(receipt, message_ids)
+            if receipt or recovered_result:
+                answer, thread_id, final_path = restore_result(receipt or recovered_result, message_ids)
             elif len(items) == 1:
                 answer, thread_id, final_path = run_codex(
                     self.key, self.project, self.store, reply_item, attachments
@@ -2064,6 +2068,7 @@ class ProjectWorker(LifecycleWorker):
             with self.store.lock:
                 for message_id in message_ids:
                     self.store.state["messages"][message_id]["prepared_reply"] = receipt
+                    self.store.state["messages"][message_id].pop("recovered_model_result", None)
                 self.store.save()
             if self.store.pause_requested(message_ids):
                 raise MaintenancePaused("System upgrade; completed output retained")
@@ -2075,6 +2080,7 @@ class ProjectWorker(LifecycleWorker):
                 answer,
                 final_path,
                 self.log_path,
+                store=self.store,
             )
             phase = "completion"
             answer_sha256 = hashlib.sha256(answer.encode("utf-8")).hexdigest()
@@ -2116,13 +2122,21 @@ class ProjectWorker(LifecycleWorker):
                 self.store.defer_batch(message_ids)
                 self.lifecycle_signal.set()
                 return
-            if isinstance(exc, ProviderCapacityError):
-                detail = "rate limit" if exc.kind == "rate_limit" else "at capacity"
-                text = (
-                    f"Codex is unavailable ({detail}). Your request is retained; the next normal catch-up will retry it. No resend is needed."
+            if isinstance(exc, ProviderFailureError) and provider_failure_is_deferred(exc.kind):
+                reason = provider_failure_reason(exc.kind, self.project.get("language") == "en")
+                text = reason + (
+                    " Your request is retained; the next normal catch-up will retry it. No resend is needed."
                     if self.project.get("language") == "en" else
-                    f"Codex 暂不可用（{detail}），消息仍待处理，下次正常巡查会再尝试，无需重发。"
+                    "消息仍待处理，下次正常巡查会再尝试，无需重发。"
                 )
+                # Existing outbox keys keep their exact pre-upgrade payload.
+                if exc.kind in {"at_capacity", "rate_limit"}:
+                    detail = "rate limit" if exc.kind == "rate_limit" else "at capacity"
+                    text = (
+                        f"Codex is unavailable ({detail}). Your request is retained; the next normal catch-up will retry it. No resend is needed."
+                        if self.project.get("language") == "en" else
+                        f"Codex 暂不可用（{detail}），消息仍待处理，下次正常巡查会再尝试，无需重发。"
+                    )
                 self.store.fail_provider_capacity(message_ids, exc.event_log, text, exc.kind)
                 for message_id in message_ids:
                     self._clear_working_reaction(message_id, working_reactions.get(message_id, ""))
@@ -2130,6 +2144,13 @@ class ProjectWorker(LifecycleWorker):
                 return
             trace = traceback.format_exc()
             append_log(self.log_path, f"failed {self.key}:{','.join(message_ids)}: {trace}")
+            if phase == "review" and recovered_result:
+                # Preserve final/outcome/run evidence, but allow the existing
+                # failed-task path to continue unfinished work next attempt.
+                with self.store.lock:
+                    for message_id in message_ids:
+                        self.store.state["messages"][message_id].pop("recovered_model_result", None)
+                    self.store.save()
             failed_at = now_iso()
             terminal = False
             for item in items:
@@ -2152,6 +2173,8 @@ class ProjectWorker(LifecycleWorker):
                     terminal = True
             if terminal:
                 text = failure_text(phase, self.project.get("language") == "en", outcome)
+                if isinstance(exc, ProviderFailureError):
+                    text += "\n" + provider_failure_reason(exc.kind, self.project.get("language") == "en")
                 key = "task-failed:" + hashlib.sha256("\0".join(message_ids).encode()).hexdigest()
                 with self.store.lock:
                     if key not in self.store.state.get("lifecycle_notices", {}):
@@ -2159,15 +2182,20 @@ class ProjectWorker(LifecycleWorker):
                         notice["failure_source_ids"] = list(message_ids)
                         self.store.save()
         finally:
+            self.store.settle_run(message_ids)
             self.reconcile_failure_reactions()
             self.lifecycle_signal.set()
 
     def _loop(self) -> None:
         while True:
+            self._worker_ready("main")
             self.signal.wait()
             self.signal.clear()
             while True:
-                items = self.store.next_pending_batch()
+                with self.store.lock:
+                    items = self.store.next_pending_batch()
+                    if items:
+                        self._active_main_thread = threading.current_thread()
                 if not items:
                     delay = self.store.pending_wait_seconds()
                     if delay is not None:
@@ -2175,7 +2203,12 @@ class ProjectWorker(LifecycleWorker):
                         self.signal.clear()
                         continue
                     break
-                self._process_batch(items)
+                self._worker_ready("main", "busy")
+                try:
+                    self._process_batch(items)
+                finally:
+                    with self.store.lock:
+                        self._active_main_thread = None
 
 
 class GatewayService:
@@ -2191,7 +2224,13 @@ class GatewayService:
             raise GatewayError(f"Wrong Feishu tenant: expected {expected_tenant}, got {actual_tenant}")
         self.client._verified_tenant_key = actual_tenant
         self.log_path = REMOTE_STATE / "logs" / "gateway.log"
-        self.reconcile_lock = threading.Lock()
+        self.reconnect_signal = threading.Event()
+        self.ws_client = None
+        self.ws_loop = None
+        self._recovery = CatchupRecovery(REMOTE_STATE / "catchup-recovery.json")
+        self._component_lock = threading.RLock()
+        self._components = {}
+        self._component_errors = {}
         self.workers: dict[str, ProjectWorker] = {}
         self.chat_to_key: dict[str, str] = {}
         for key, project in config["projects"].items():
@@ -2208,11 +2247,19 @@ class GatewayService:
 
     def start_workers(self) -> None:
         def prepare(worker: ProjectWorker) -> None:
-            worker.reconcile_reactions()
-            worker.start()
+            # Reaction repair is auxiliary: its network failure cannot disable
+            # durable message processing for the whole project.
+            try:
+                worker.reconcile_reactions()
+            except Exception as exc:
+                append_log(self.log_path, f"startup reaction repair failed {worker.key}: {type(exc).__name__}")
+            finally:
+                worker._prepared = True
+                worker.start()
         for key, worker in self.workers.items():
-            # Historical network calls for one project cannot block the shared
-            # receive/sync transport or startup of the other project workers.
+            worker._prepared = False
+            # A slow historical reaction request must not hold the shared
+            # receive/sync transport, or another project's worker, offline.
             threading.Thread(target=prepare, args=(worker,),
                              name=f"startup-{key}", daemon=True).start()
 
@@ -2225,48 +2272,168 @@ class GatewayService:
             return False
         return self.workers[key].enqueue(message)
 
-    def catch_up(
-        self,
-        project_keys: list[str] | None = None,
-        *,
-        continue_on_error: bool = False,
-        log_when_empty: bool = True,
-    ) -> dict[str, int]:
+    def recovery(self):
+        # Lazy creation also supports isolated service fixtures.
+        if not hasattr(self, "_recovery"):
+            self._recovery = CatchupRecovery(REMOTE_STATE / "catchup-recovery.json")
+        return self._recovery
+
+    def request_catch_up(self, project_keys=None):
+        try:
+            self.recovery().request(list(self.workers) if project_keys is None else project_keys)
+        finally:
+            # A failed intent write still leaves desired work in memory. Wake
+            # the existing recovery loop; do not falsely acknowledge durability.
+            self.reconnect_signal.set()
+
+    def catch_up(self, project_keys: list[str] | None = None) -> dict[str, int]:
         result: dict[str, int] = {}
-        errors: dict[str, str] = {}
-        # Manual sync, reconnect, periodic repair and graceful reload can race.
-        # Serialize only the bounded Feishu history calls; never hold this lock
-        # while Codex processes a task.
-        with self.reconcile_lock:
-            for key, worker in self.workers.items():
-                if project_keys is not None and key not in project_keys:
-                    continue
+        errors = {}
+        recovery = self.recovery()
+        for key, worker in self.workers.items():
+            if project_keys is not None and key not in project_keys:
+                continue
+            with recovery.group_lock(key):
+                revision = recovery.pending().get(key)
                 try:
-                    cursor = int(
-                        worker.store.state.get("cursor")
-                        or worker.project.get("registered_epoch")
-                        or now_epoch()
-                    )
+                    with worker.store.lock:
+                        cursor = int(worker.store.state.get("cursor") or worker.project.get("registered_epoch") or now_epoch())
                     messages = self.client.list_messages(worker.project["chat_id"], max(0, cursor - 2))
+                    worker.store.resume_provider_pending()
                     added = 0
+                    high_water = cursor
                     for message in messages:
                         added += int(worker.enqueue(normalize_history_message(message)))
+                        high_water = max(high_water, int(str(message.get("create_time") or "0")) // 1000)
+                    # Commit only after complete pagination and durable enqueue of
+                    # every returned message. An interrupted pass safely dedupes.
+                    with worker.store.lock:
+                        worker.store.state["cursor"] = high_water
+                        worker.store.save()
+                    recovery.complete(key, revision)
                     result[key] = added
-                    worker.store.resume_provider_pending()
                     worker.signal.set()
                     worker.branch_signal.set()
                 except Exception as exc:
-                    if not continue_on_error:
-                        raise
-                    errors[key] = f"{type(exc).__name__}: {exc}"
-        if log_when_empty or any(result.values()) or errors:
-            append_log(self.log_path, f"catch-up complete: {result}; errors={errors}")
+                    recovery.failed(key)
+                    # Wake an idle recovery worker for failures from manual or
+                    # hourly scans; its own failures follow the SDK retry cadence.
+                    if threading.current_thread() is not getattr(self, "_components", {}).get("reconnect-catch-up"):
+                        self.reconnect_signal.set()
+                    errors[key] = type(exc).__name__
+        append_log(self.log_path, f"catch-up complete: {result}; failed={errors}")
+        if errors:
+            error = GatewayError(f"History reconciliation incomplete: {errors}")
+            error.added = result
+            raise error
         return result
+
+    def _component_entry(self, name, target):
+        while True:
+            try:
+                target()
+                raise RuntimeError("Component loop returned unexpectedly")
+            except BaseException as exc:
+                self._component_errors[name] = type(exc).__name__
+                try:
+                    append_log(self.log_path, f"service component failed {name}: {type(exc).__name__}; restarting existing component")
+                except Exception:
+                    pass
+            time.sleep(0.5)  # Existing control-loop cadence, not a new timer.
+
+    def ensure_components(self):
+        if not hasattr(self, "_component_targets"):
+            return
+        with self._component_lock:
+            for name, target in self._component_targets.items():
+                thread = self._components.get(name)
+                if thread is None or not thread.is_alive():
+                    thread = threading.Thread(target=self._component_entry, args=(name, target),
+                                              name=name, daemon=True)
+                    self._components[name] = thread
+                    thread.start()
+        for worker in self.workers.values():
+            if getattr(worker, "_prepared", True):
+                worker.ensure_worker_threads()
+
+    def component_step(self, name):
+        if hasattr(self, "_component_errors"):
+            self._component_errors.pop(name, None)
+
+    def transport_status(self) -> dict[str, Any]:
+        """Verify a fresh application PONG through the actual SDK receiver.
+
+        REST catch-up, socket OPEN, and a living PID are not reception proof.
+        Timeout reports failure without cancelling the transport's recovery or
+        killing a possibly busy model worker.
+        """
+        client = getattr(self, "ws_client", None)
+        event_loop = getattr(self, "ws_loop", None)
+        loop_running = event_loop is not None and event_loop.is_running()
+        result = {"healthy": False, "connected": False, "state": "DISCONNECTED",
+                  "event_loop_running": bool(loop_running),
+                  "verification": "feishu-application-pong", "checked_at": now_iso()}
+        if loop_running and callable(getattr(client, "probe", None)):
+            try:
+                future = asyncio.run_coroutine_threadsafe(client.probe(), event_loop)
+                result.update(future.result(timeout=client.probe_timeout()))
+            except Exception as exc:
+                result.update(healthy=False, connected=False, error=type(exc).__name__)
+        else:
+            result["error"] = "FunctionalReceiverUnavailable"
+        # Keep connected as the compatibility key, but require functional proof.
+        result["connected"] = bool(result.get("healthy"))
+        worker_health = {key: worker.worker_health() for key, worker in getattr(self, "workers", {}).items()
+                         if callable(getattr(worker, "worker_health", None))}
+        components = {name: thread.is_alive() for name, thread in getattr(self, "_components", {}).items()}
+        recovery = getattr(self, "_recovery", None)
+        pending = recovery.pending() if recovery is not None else {}
+        result.update(workers=worker_health, components=components,
+                      component_errors=dict(getattr(self, "_component_errors", {})),
+                      pending_catchup=list(pending))
+        result["healthy"] = (result["connected"] and all(row["healthy"] for row in worker_health.values())
+                             and all(components.values()) and not result["component_errors"] and not pending)
+        atomic_write_json(REMOTE_STATE / "transport-health.json", {"pid": os.getpid(), **result})
+        if not result["healthy"]:
+            append_log(self.log_path, "shared reception health check failed; see transport-health.json")
+        return result
+
+    def on_ws_reconnecting(self) -> None:
+        append_log(self.log_path, "Feishu transport reconnecting")
+        self.request_catch_up()
+
+    def on_ws_reconnected(self) -> None:
+        # The SDK callback runs on its event loop. History IO belongs in the
+        # existing Listener, off that loop, including hourly-opted-out projects.
+        append_log(self.log_path, "Feishu transport reconnected; catch-up requested")
+        self.request_catch_up()
+
+    def reconcile_reconnects(self) -> None:
+        while True:
+            self.component_step("reconnect-catch-up")
+            pending = self.recovery().pending()
+            # Reuse the SDK/server reconnect cadence for failed history work.
+            # A new reconnect/start request still wakes this immediately.
+            retry_interval = getattr(getattr(self, "ws_client", None), "_reconnect_interval", None)
+            if pending and retry_interval is not None:
+                self.reconnect_signal.wait(retry_interval)
+            else:
+                self.reconnect_signal.wait()
+            self.reconnect_signal.clear()
+            keys = [key for key in self.recovery().pending() if key in self.workers]
+            if not keys:
+                continue
+            try:
+                self.catch_up(keys)
+            except Exception as exc:
+                append_log(self.log_path, f"reconnect catch-up failed: {type(exc).__name__}; intent retained")
 
     def process_sync_requests(self) -> None:
         SYNC_REQUESTS.mkdir(parents=True, exist_ok=True)
         SYNC_RESPONSES.mkdir(parents=True, exist_ok=True)
         while True:
+            self.ensure_components()
+            self.component_step("manual-sync")
             for request_path in sorted(SYNC_REQUESTS.glob("*.json")):
                 request_id = request_path.stem
                 response_path = SYNC_RESPONSES / f"{request_id}.json"
@@ -2308,13 +2475,17 @@ class GatewayService:
                     added = self.catch_up(project_keys)
                     for key in project_keys:
                         self.workers[key].signal.set()
+                    transport = self.transport_status()
                     response = {
-                        "ok": True,
+                        "ok": transport["healthy"],
                         "request_id": request_id,
                         "project_keys": project_keys,
                         "added": added,
+                        "transport": transport,
                         "acknowledged_at": now_iso(),
                     }
+                    if not transport["healthy"]:
+                        response["error"] = "Shared realtime reception is not healthy; see transport, worker and pending-catchup details"
                     append_log(self.log_path, f"manual sync acknowledged: {request_id} {added}")
                 except Exception as exc:
                     response = {"ok": False, "request_id": request_id, "error": str(exc)}
@@ -2332,6 +2503,14 @@ class GatewayService:
             with worker.store.lock:
                 items = [dict(item) for item in worker.store.state.get("messages", {}).values()]
                 bootstrap_unknown = worker.store.state.get("main_bootstrap_state") == "outcome_unknown"
+                handoff_ready = set()
+                for item in items:
+                    if item.get("status") != "processing" or item.get("run_recovery") != "ready":
+                        continue
+                    owner = (getattr(worker, "active_branches", {}).get(item["message_id"])
+                             if parallel_message(item) else getattr(worker, "_active_main_thread", None))
+                    if owner is None or not owner.is_alive():
+                        handoff_ready.add(item["message_id"])
             project_counts: dict[str, int] = {}
             for item in items:
                 status_name = str(item.get("status") or "unknown")
@@ -2341,7 +2520,10 @@ class GatewayService:
                 if status_name == "processing" or (not fork_unknown and (
                     status_name == "pending" or (status_name == "failed" and attempts < 3)
                 )):
-                    active.append({"project_key": key, "message_id": item.get("message_id"), "status": status_name})
+                    entry = {"project_key": key, "message_id": item.get("message_id"), "status": status_name}
+                    if item.get("message_id") in handoff_ready:
+                        entry["recovery_handoff_ready"] = True
+                    active.append(entry)
                 elif status_name == "provider_failed" or (status_name == "failed" and attempts >= 3) or (fork_unknown and status_name in {"pending", "failed"}):
                     terminal_failures.append(
                         {"project_key": key, "message_id": item.get("message_id"),
@@ -2356,7 +2538,8 @@ class GatewayService:
         while time.monotonic() < deadline:
             snapshot = self.queue_snapshot(project_keys)
             draining = any(
-                entry["status"] == "processing" or self.workers[entry["project_key"]].store.admission_open
+                self.workers[entry["project_key"]].store.admission_open
+                or (entry["status"] == "processing" and not entry.get("recovery_handoff_ready"))
                 for entry in snapshot["active"]
             )
             branches_running = any(self.workers[key].active_branches for key in project_keys)
@@ -2380,6 +2563,8 @@ class GatewayService:
         RELOAD_REQUESTS.mkdir(parents=True, exist_ok=True)
         RELOAD_RESPONSES.mkdir(parents=True, exist_ok=True)
         while True:
+            self.ensure_components()
+            self.component_step("graceful-reload")
             for request_path in sorted(RELOAD_REQUESTS.glob("*.json")):
                 request_id = request_path.stem
                 response_path = RELOAD_RESPONSES / f"{request_id}.json"
@@ -2433,37 +2618,34 @@ class GatewayService:
         try:
             import lark_oapi as lark
             from lark_oapi.event.dispatcher_handler import EventDispatcherHandler
-            from lark_oapi.ws.client import Client as WsClient
+            from gateway_transport import Client as WsClient
         except ImportError as exc:
             raise GatewayError("lark-oapi is not installed in the gateway environment") from exc
 
         self.start_workers()
-        self.catch_up()
-
-        reconnect_signal = threading.Event()
 
         def hourly() -> None:
             interval = int(self.config.get("catch_up_seconds") or 3600)
             while True:
-                reconnected = reconnect_signal.wait(timeout=interval)
-                reconnect_signal.clear()
+                time.sleep(interval)
                 try:
-                    project_keys = scheduled_catch_up_project_keys(
-                        self.workers,
-                        reconnected=reconnected,
-                    )
+                    self.component_step("hourly-catch-up")
+                    project_keys = hourly_catch_up_project_keys(self.workers)
                     if project_keys:
-                        self.catch_up(
-                            project_keys,
-                            continue_on_error=reconnected,
-                            log_when_empty=True,
-                        )
+                        self.transport_status()
+                        self.catch_up(project_keys)
                 except Exception:
-                    append_log(self.log_path, "hourly/reconnect catch-up failed:\n" + traceback.format_exc())
+                    append_log(self.log_path, "hourly catch-up failed:\n" + traceback.format_exc())
 
-        threading.Thread(target=hourly, name="hourly-catch-up", daemon=True).start()
-        threading.Thread(target=self.process_sync_requests, name="manual-sync", daemon=True).start()
-        threading.Thread(target=self.process_reload_requests, name="graceful-reload", daemon=True).start()
+        self._component_lock = threading.RLock()
+        self._components = {}
+        self._component_errors = {}
+        self._component_targets = {
+            "reconnect-catch-up": self.reconcile_reconnects,
+            "hourly-catch-up": hourly,
+            "manual-sync": self.process_sync_requests,
+            "graceful-reload": self.process_reload_requests,
+        }
 
         def on_message(event: Any) -> None:
             data = getattr(event, "event", None)
@@ -2500,8 +2682,13 @@ class GatewayService:
             event_handler=dispatcher,
             auto_reconnect=True,
         )
-        if not attach_reconnect_reconciliation(ws_client, reconnect_signal):
-            append_log(self.log_path, "SDK has no reconnect callback; startup/hourly reconciliation remains active")
+        from lark_oapi.ws.client import loop as ws_loop
+        self.ws_client = ws_client
+        self.ws_loop = ws_loop
+        ws_client.on_reconnecting = self.on_ws_reconnecting
+        ws_client.on_reconnected = self.on_ws_reconnected
+        self.request_catch_up()
+        self.ensure_components()
         ws_client.start()
 
 
@@ -2948,6 +3135,7 @@ def request_sync(args: argparse.Namespace) -> dict[str, Any]:
             "project_keys": project_keys,
             "status": "accepted",
             "added": response.get("added") or {},
+            "transport": response.get("transport") or {},
             "usage_reports": usage_reports,
             "inspection_reports": inspection_reports,
             "progress_reports": progress_reports,
@@ -2982,6 +3170,7 @@ def request_sync(args: argparse.Namespace) -> dict[str, Any]:
                 "request_id": request_id,
                 "project_keys": project_keys,
                 "added": response.get("added") or {},
+                "transport": response.get("transport") or {},
                 "counts": counts,
                 "usage_reports": usage_reports,
                 "inspection_reports": inspection_reports,
@@ -3342,7 +3531,11 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "catch-up":
             value = request_sync(args)
         elif args.command == "run":
-            GatewayService(load_config()).run()
+            with listener_lease() as acquired:
+                if not acquired:
+                    append_log(REMOTE_STATE / "logs" / "gateway.log", "Listener already owns this runtime; duplicate start ignored")
+                    return 0
+                GatewayService(load_config()).run()
             return 0
         else:
             raise AssertionError(args.command)

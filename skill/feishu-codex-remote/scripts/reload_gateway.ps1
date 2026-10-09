@@ -4,6 +4,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "windowless_process.ps1")
 $TaskName = "CodexFeishuRemoteGateway"
 $Runtime = Join-Path $env:LOCALAPPDATA "CodexFeishuRemote"
 $Python = Join-Path $Runtime ".venv\Scripts\python.exe"
@@ -16,13 +17,13 @@ if ($Task.State -ne "Running") {
 }
 
 if ($RequestOnly) {
-    & $Python $Gateway reload --wait-timeout $WaitTimeoutSeconds --request-only
-    exit $LASTEXITCODE
+    $ReloadExitCode = Invoke-WindowlessProcess -FilePath $Python -ArgumentList @($Gateway, "reload", "--wait-timeout", $WaitTimeoutSeconds, "--request-only")
+    exit $ReloadExitCode
 }
 
-& $Python $Gateway reload --wait-timeout $WaitTimeoutSeconds
-if ($LASTEXITCODE -ne 0) {
-    exit $LASTEXITCODE
+$ReloadExitCode = Invoke-WindowlessProcess -FilePath $Python -ArgumentList @($Gateway, "reload", "--wait-timeout", $WaitTimeoutSeconds)
+if ($ReloadExitCode -ne 0) {
+    exit $ReloadExitCode
 }
 
 # The Listener writes its acknowledgement before exiting. Give Task Scheduler

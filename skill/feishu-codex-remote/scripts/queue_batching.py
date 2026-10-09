@@ -6,6 +6,17 @@ from gateway_common import message_text, resource_keys
 
 QUIET_WINDOW_SECONDS = 5.0
 
+def star_boundaries(item):
+    """Edges delimit main-lane batches; hash branches retain their own route.
+
+    Inspect without rewriting durable source text or treating interior stars
+    as controls. A star with attachments is still a normal work item.
+    """
+    text = message_text(item.get("content")).strip()
+    if text.startswith("#"):
+        return False, False
+    return text.startswith("*"), text.endswith("*")
+
 def route_key(item):
     sender = item.get("sender") or {}
     identity = sender.get("id") or sender.get("sender_id") or {}
@@ -21,14 +32,15 @@ def received_epoch(item):
     return int(item.get("create_time") or 0) / 1000.0
 
 def prepared_batch(first, items):
-    receipt = first.get("prepared_reply")
+    field = "prepared_reply" if first.get("prepared_reply") else "recovered_model_result"
+    receipt = first.get(field)
     if not receipt:
         return None
     by_id = {item["message_id"]: item for item in items}
     rows = [by_id.get(mid) for mid in receipt.get("message_ids", [])]
     if not rows or any(not row or row.get("status") not in {"pending", "failed"}
                        or int(row.get("attempts") or 0) >= 3
-                       or row.get("provider_wait") or row.get("prepared_reply") != receipt for row in rows):
+                       or row.get("provider_wait") or row.get(field) != receipt for row in rows):
         return []
     return rows
 
@@ -63,9 +75,11 @@ def select_pending(items, forced_single, routing_mode, *, now=None,
     # Wait on the whole unstarted same-sender prefix, not the eventual reply
     # routing subdivision. A star ends the prefix's quiet wait immediately.
     prefix = [first]
-    star_barrier = False
+    star_barrier = star_boundaries(first)[1]
     for item in pending[1:]:
-        if item.get("prepared_reply"):
+        if star_barrier:
+            break
+        if item.get("prepared_reply") or item.get("recovered_model_result"):
             break
         if item.get("provider_wait"):
             break
@@ -75,6 +89,7 @@ def select_pending(items, forced_single, routing_mode, *, now=None,
             star_barrier = True
             break
         prefix.append(item)
+        star_barrier = star_boundaries(item)[1]
     delay = 0.0 if star_barrier else max(
         0.0, max(received_epoch(item) for item in prefix)
         + max(0.0, quiet_seconds) - (time.time() if now is None else now))

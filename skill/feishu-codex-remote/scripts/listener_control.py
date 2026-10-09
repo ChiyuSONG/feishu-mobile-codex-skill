@@ -4,6 +4,10 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+from datetime import datetime
+import errno
+import uuid
 import json
 import os
 from pathlib import Path
@@ -13,13 +17,48 @@ import subprocess
 from typing import Any
 
 from bootstrap import codex_cli_candidate
-from gateway_common import REMOTE_STATE
+from gateway_common import REMOTE_STATE, atomic_write_json, load_config
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 LABEL = "feishu-codex-remote.listener"
 WINDOWS_TASK = "CodexFeishuRemoteGateway"
 
+
+@contextmanager
+def listener_lease(path: Path | None = None):
+    """A native process-lifetime lock: duplicate consumers cannot open the inbox."""
+    target = path or REMOTE_STATE / "listener.lock"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    handle = target.open("a+b")
+    acquired = False
+    try:
+        if target.stat().st_size == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquired = True
+        except OSError as exc:
+            if exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                raise
+        yield acquired
+    finally:
+        if acquired:
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
 
 def runtime_python(system: str | None = None) -> Path:
     current = system or platform.system()
@@ -164,13 +203,33 @@ def install_listener() -> dict[str, Any]:
     raise RuntimeError(f"Unsupported platform: {current}")
 
 
+def request_startup_reconciliation() -> dict[str, Any]:
+    """SessionStart also wakes an already-running shared receiver.
+
+    Queue ownership stays in the Listener. Returning queued is not a health
+    claim; its normal sync handler records the eventual result.
+    """
+    config = load_config()
+    keys = [key for key, project in config.get("projects", {}).items()
+            if isinstance(project, dict) and project.get("chat_id")]
+    if not keys:
+        return {"status": "no-registered-chats"}
+    request_id = uuid.uuid4().hex
+    atomic_write_json(REMOTE_STATE / "sync_requests" / f"{request_id}.json", {
+        "request_id": request_id, "project_keys": keys, "source": "session-start",
+        "requested_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+    })
+    return {"status": "queued", "request_id": request_id}
+
+
 def start_listener() -> dict[str, Any]:
     current = platform.system()
     if current == "Windows":
         result = _run(["schtasks.exe", "/Run", "/TN", WINDOWS_TASK])
         if result.returncode != 0:
             raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Could not start Listener task")
-        return {"ok": True, "platform": current, "launcher": WINDOWS_TASK}
+        return {"ok": True, "platform": current, "launcher": WINDOWS_TASK,
+                "startup_reconciliation": request_startup_reconciliation()}
     if current == "Darwin":
         if not mac_registered():
             install_macos()
@@ -180,7 +239,8 @@ def start_listener() -> dict[str, Any]:
         result = _run(["launchctl", "kickstart", f"{mac_domain()}/{LABEL}"])
         if result.returncode != 0:
             raise RuntimeError(result.stderr.strip() or "Could not start macOS Listener agent")
-        return {"ok": True, "platform": current, "launcher": LABEL}
+        return {"ok": True, "platform": current, "launcher": LABEL,
+                "startup_reconciliation": request_startup_reconciliation()}
     raise RuntimeError(f"Unsupported platform: {current}")
 
 

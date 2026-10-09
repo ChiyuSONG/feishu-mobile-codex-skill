@@ -163,6 +163,7 @@ class LifecycleStore:
     def exit_maintenance(self, completion=None):
         with self.lock:
             if any(row.get("status") == "processing" and row.get("defer_requested")
+                   and row.get("run_recovery") != "ready"
                    for row in self.state.get("messages", {}).values()):
                 raise GatewayError("Active work is still stopping; maintenance remains enabled")
             mode = self.state.setdefault("maintenance", {})
@@ -173,6 +174,11 @@ class LifecycleStore:
                     raise GatewayError("Completion belongs to a different maintenance generation")
                 mode["completion_intent"] = completion
             for row in self.state.get("messages", {}).values():
+                if row.get("status") == "processing" and row.get("run_recovery") == "ready":
+                    # Reconciled original result (or proven unsubmitted claim)
+                    # stays on its original attempt until the worker resumes it.
+                    row.pop("defer_requested", None)
+                    row.pop("maintenance_stop_error", None)
                 if row.get("status") == "deferred" or (row.get("status") == "pending" and row.get("defer_requested")):
                     row["status"] = "pending"
                     row.pop("defer_requested", None)
@@ -265,9 +271,13 @@ def run_model_process(command, *, input, store, message_ids, check=False, **kwar
     with store.lock:
         if store.pause_requested(message_ids):
             raise MaintenancePaused("System upgrade; original request retained")
+        if callable(getattr(store, "begin_process", None)):
+            store.begin_process(message_ids)
         process = subprocess.Popen(
             command, stdin=subprocess.PIPE, start_new_session=os.name != "nt", **kwargs)
     try:
+        if callable(getattr(store, "record_child", None)):
+            store.record_child(message_ids, process)
         remaining_input = input
         while True:
             try:
@@ -278,6 +288,8 @@ def run_model_process(command, *, input, store, message_ids, check=False, **kwar
                 if store.pause_requested(message_ids):
                     _stop_process_tree(process)
                     raise MaintenancePaused("System upgrade; original request retained")
+        if callable(getattr(store, "record_child_exit", None)):
+            store.record_child_exit(message_ids, process.returncode)
         return subprocess.CompletedProcess(command, process.returncode)
     except BaseException:
         try:

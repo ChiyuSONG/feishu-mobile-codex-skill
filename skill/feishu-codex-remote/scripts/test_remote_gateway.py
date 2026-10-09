@@ -15,6 +15,14 @@ import remote_gateway
 from gateway_common import FeishuClient, GatewayError, message_text, resource_keys
 
 
+def delivery_store(root, message_id):
+    with patch.object(remote_gateway, "REMOTE_STATE", Path(root) / "reply-runtime"):
+        store = remote_gateway.ProjectStore("reply-fixture")
+    store.state["messages"].setdefault(message_id, {"message_id": message_id, "status": "processing"})
+    store.save()
+    return store
+
+
 def write_rollout(path: Path, messages: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = []
@@ -320,6 +328,7 @@ class RoutingTests(unittest.TestCase):
                 root=root,
                 thread_id=lambda: "thread-1",
                 record_run=lambda message_ids, event_log: recorded.append((message_ids, event_log)),
+                prepare_run=lambda *_args: None,
             )
 
             def complete(command, **_kwargs):
@@ -747,6 +756,7 @@ class RoutingTests(unittest.TestCase):
 
             def reply_post(self, _message_id, markdown, _uuid):
                 self.text = markdown
+                return {"data": {"message_id": "synthetic-reply-receipt"}}
 
             def upload_message_image(self, path, _allowed_root):
                 self.images.append(("upload", Path(path).name))
@@ -754,6 +764,7 @@ class RoutingTests(unittest.TestCase):
 
             def reply_image(self, _message_id, image_key, request_uuid):
                 self.images.append(("reply", image_key, request_uuid))
+                return {"data": {"message_id": "synthetic-reply-receipt"}}
 
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -775,6 +786,7 @@ class RoutingTests(unittest.TestCase):
                     answer,
                     final_path,
                     root / "gateway.log",
+                    store=delivery_store(final_path.parent, 'om_1'),
                 )
             self.assertEqual(link, published["document_url"])
             self.assertIn("preview.png", client.text)
@@ -793,9 +805,11 @@ class RoutingTests(unittest.TestCase):
 
             def reply_post(self, _message_id, _markdown, _uuid):
                 self.events.append(("post", _markdown))
+                return {"data": {"message_id": "synthetic-reply-receipt"}}
 
             def send_post(self, _chat_id, markdown, _uuid):
                 self.events.append(("warning", markdown))
+                return {"data": {"message_id": "synthetic-reply-receipt"}}
 
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -812,28 +826,35 @@ class RoutingTests(unittest.TestCase):
                 answer,
                 final_path,
                 root / "gateway.log",
+                    store=delivery_store(final_path.parent, 'om_1'),
             )
         self.assertEqual(client.events[0][0], "post")
         self.assertTrue(client.events[0][1].startswith("附件未送达（preview.png）"))
         self.assertNotIn("飞书文档中的备用链接", client.events[0][1])
         self.assertEqual(len(client.events), 1)
 
-    def test_direct_image_reply_failure_sends_verified_warning(self):
+    def test_direct_image_reply_failure_retains_unconfirmed_media_for_retry(self):
         class Client:
             def __init__(self):
                 self.events = []
+                self.fail_image = True
 
             def upload_message_image(self, _path, _allowed_root):
                 return "img_1"
 
             def reply_image(self, _message_id, _image_key, _uuid):
-                raise RuntimeError("reply failed")
+                if self.fail_image:
+                    raise RuntimeError("reply failed")
+                self.events.append(("image", _image_key))
+                return {"data": {"message_id": "synthetic-reply-receipt"}}
 
             def reply_post(self, _message_id, markdown, _uuid):
                 self.events.append(("post", markdown))
+                return {"data": {"message_id": "synthetic-reply-receipt"}}
 
             def send_post(self, _chat_id, markdown, _uuid):
                 self.events.append(("warning", markdown))
+                return {"data": {"message_id": "synthetic-reply-receipt"}}
 
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -843,18 +864,20 @@ class RoutingTests(unittest.TestCase):
             final_path = root / "final.md"
             final_path.write_text(answer, encoding="utf-8")
             client = Client()
-            remote_gateway.reply_complete(
-                client,
-                {"chat_id": "oc_1", "working_directory": str(root)},
-                {"message_id": "om_1", "content": '{"text":"show image"}'},
-                answer,
-                final_path,
-                root / "gateway.log",
-            )
+            store = delivery_store(final_path.parent, "om_1")
+            args = (client, {"chat_id": "oc_1", "working_directory": str(root)},
+                    {"message_id": "om_1", "content": '{"text":"show image"}'},
+                    answer, final_path, root / "gateway.log")
+            with self.assertRaisesRegex(RuntimeError, "reply failed"):
+                remote_gateway.reply_complete(*args, store=store)
+            receipt = store.state["messages"]["om_1"]["reply_delivery"]
+            self.assertEqual(receipt["status"], "pending")
+            self.assertEqual(set(receipt["delivered_parts"]), {"text:0"})
+            client.fail_image = False
+            remote_gateway.reply_complete(*args, store=store)
         self.assertEqual(client.events[0], ("post", answer))
-        self.assertEqual(client.events[1][0], "warning")
-        self.assertIn("部分附件未送达（preview.png）", client.events[1][1])
-        self.assertNotIn("飞书文档中的备用链接", client.events[1][1])
+        self.assertEqual(client.events[1], ("image", "img_1"))
+        self.assertEqual(len(client.events), 2)
 
     def test_document_image_upload_failure_is_prefixed_when_no_fallback_exists(self):
         class Client:
@@ -866,9 +889,11 @@ class RoutingTests(unittest.TestCase):
 
             def reply_post(self, _message_id, markdown, _uuid):
                 self.events.append(("post", markdown))
+                return {"data": {"message_id": "synthetic-reply-receipt"}}
 
             def send_post(self, _chat_id, markdown, _uuid):
                 self.events.append(("warning", markdown))
+                return {"data": {"message_id": "synthetic-reply-receipt"}}
 
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -890,6 +915,7 @@ class RoutingTests(unittest.TestCase):
                     answer,
                     final_path,
                     root / "gateway.log",
+                    store=delivery_store(final_path.parent, 'om_1'),
                 )
         self.assertEqual(link, "https://www.feishu.cn/docx/doc_1")
         self.assertTrue(client.events[0][1].startswith("附件未送达（preview.png）"))
@@ -921,9 +947,11 @@ class RoutingTests(unittest.TestCase):
 
             def reply_post(self, _message_id, _markdown, _uuid):
                 self.events.append(("post",))
+                return {"data": {"message_id": "synthetic-reply-receipt"}}
 
             def reply_file(self, _message_id, file_key, request_uuid):
                 self.events.append(("file", file_key, request_uuid))
+                return {"data": {"message_id": "synthetic-reply-receipt"}}
 
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -949,6 +977,7 @@ class RoutingTests(unittest.TestCase):
                     answer,
                     final_path,
                     root / "gateway.log",
+                    store=delivery_store(final_path.parent, 'om_1'),
                 )
         self.assertEqual(
             [event[:2] for event in client.events],
@@ -969,9 +998,11 @@ class RoutingTests(unittest.TestCase):
 
             def reply_post(self, _message_id, markdown, _uuid):
                 self.parts.append(markdown)
+                return {"data": {"message_id": "synthetic-reply-receipt"}}
 
             def send_post(self, _chat_id, markdown, _uuid):
                 self.parts.append(markdown)
+                return {"data": {"message_id": "synthetic-reply-receipt"}}
 
         with tempfile.TemporaryDirectory() as raw:
             final_path = Path(raw) / "final.md"
@@ -987,6 +1018,7 @@ class RoutingTests(unittest.TestCase):
                     answer,
                     final_path,
                     log_path,
+                    store=delivery_store(final_path.parent, 'om_1'),
                 )
             self.assertEqual(link, "")
             self.assertEqual("".join(client.parts), answer)
@@ -1025,7 +1057,7 @@ class RoutingTests(unittest.TestCase):
                 item = worker.store.next_pending(quiet_window_seconds=0)
                 with (
                     patch.object(remote_gateway, "run_codex", return_value=("完成", "thread-1", final_path)),
-                    patch.object(remote_gateway, "reply_complete", side_effect=lambda *_args: client.events.append(("reply", "complete")) or ""),
+                    patch.object(remote_gateway, "reply_complete", side_effect=lambda *_args, **_kwargs: client.events.append(("reply", "complete")) or ""),
                 ):
                     worker._process(item)
                 stored = worker.store.state["messages"]["om_1"]
@@ -1116,7 +1148,7 @@ class RoutingTests(unittest.TestCase):
                     patch.object(
                         remote_gateway,
                         "reply_complete",
-                        side_effect=lambda _client, _project, item, *_args: client.events.append(
+                        side_effect=lambda _client, _project, item, *_args, **_kwargs: client.events.append(
                             ("reply", item["message_id"])
                         ) or "",
                     ),
@@ -1300,6 +1332,14 @@ class ContextBridgeTests(unittest.TestCase):
 
 
 class ReconciliationTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        isolate = patch.object(remote_gateway, "REMOTE_STATE", self.root)
+        isolate.start()
+        self.addCleanup(isolate.stop)
+
     def test_hourly_catch_up_project_keys_honors_per_project_opt_out(self):
         workers = {
             "default": SimpleNamespace(project={"working_directory": r"C:\project"}),
@@ -1308,25 +1348,24 @@ class ReconciliationTests(unittest.TestCase):
             ),
         }
         self.assertEqual(remote_gateway.hourly_catch_up_project_keys(workers), ["default"])
-        self.assertEqual(
-            remote_gateway.scheduled_catch_up_project_keys(workers, reconnected=False),
-            ["default"],
-        )
-        self.assertEqual(
-            remote_gateway.scheduled_catch_up_project_keys(workers, reconnected=True),
-            ["default", "disabled"],
-        )
+        service = object.__new__(remote_gateway.GatewayService)
+        service.workers = workers
+        service.reconnect_signal = threading.Event()
+        service._recovery = remote_gateway.CatchupRecovery(self.root / "catchup.json")
+        service.request_catch_up()
+        self.assertEqual(set(service.recovery().pending()), {"default", "disabled"})
 
     def test_reconnect_callback_only_wakes_background_reconciliation(self):
-        signal = threading.Event()
-        client = SimpleNamespace(on_reconnected=None)
-        self.assertTrue(remote_gateway.attach_reconnect_reconciliation(client, signal))
-        self.assertFalse(signal.is_set())
-        client.on_reconnected()
-        self.assertTrue(signal.is_set())
-        self.assertFalse(
-            remote_gateway.attach_reconnect_reconciliation(SimpleNamespace(), threading.Event())
-        )
+        service = object.__new__(remote_gateway.GatewayService)
+        service.workers = {"bound": SimpleNamespace()}
+        service.reconnect_signal = threading.Event()
+        service._recovery = remote_gateway.CatchupRecovery(self.root / "catchup.json")
+        service.log_path = self.root / "gateway.log"
+        with patch.object(service, "catch_up") as history:
+            service.on_ws_reconnected()
+        self.assertTrue(service.reconnect_signal.is_set())
+        self.assertEqual(set(service.recovery().pending()), {"bound"})
+        history.assert_not_called()
 
     def test_reconnect_reconciliation_can_include_hourly_opt_out_projects_and_isolate_failures(self):
         class Client:
@@ -1346,7 +1385,7 @@ class ReconciliationTests(unittest.TestCase):
                     "registered_epoch": 1,
                     "hourly_catch_up_enabled": hourly_enabled,
                 }
-                self.store = SimpleNamespace(state={"cursor": 1}, resume_provider_pending=lambda: None)
+                self.store = SimpleNamespace(state={"cursor": 1}, lock=threading.RLock(), save=lambda: None, resume_provider_pending=lambda: None)
                 self.signal = threading.Event()
                 self.branch_signal = threading.Event()
 
@@ -1357,14 +1396,18 @@ class ReconciliationTests(unittest.TestCase):
         service.client = Client()
         service.log_path = Path("unused.log")
         service.reconcile_lock = threading.Lock()
+        service.reconnect_signal = threading.Event()
+        service._recovery = remote_gateway.CatchupRecovery(self.root / "catchup.json")
         service.workers = {
             "opted_out": Worker("chat_opted_out", False),
             "bad": Worker("chat_bad", True),
             "healthy": Worker("chat_healthy", True),
         }
         with patch.object(remote_gateway, "append_log"):
-            result = service.catch_up(continue_on_error=True, log_when_empty=False)
-        self.assertEqual(result, {"opted_out": 0, "healthy": 0})
+            with self.assertRaises(remote_gateway.GatewayError) as failure:
+                service.catch_up()
+        self.assertEqual(failure.exception.added, {"opted_out": 0, "healthy": 0})
+        self.assertEqual(set(service.recovery().pending()), {"bad"})
         self.assertEqual(service.client.calls, ["chat_opted_out", "chat_bad", "chat_healthy"])
 
     def test_concurrent_reconciliation_calls_do_not_overlap(self):
@@ -1393,7 +1436,7 @@ class ReconciliationTests(unittest.TestCase):
 
         worker = SimpleNamespace(
             project={"chat_id": "chat_1", "registered_epoch": 1},
-            store=SimpleNamespace(state={"cursor": 1}, resume_provider_pending=lambda: None),
+            store=SimpleNamespace(state={"cursor": 1}, lock=threading.RLock(), save=lambda: None, resume_provider_pending=lambda: None),
             signal=threading.Event(), branch_signal=threading.Event(),
             enqueue=lambda _message: False,
         )
@@ -1401,6 +1444,8 @@ class ReconciliationTests(unittest.TestCase):
         service.client = Client()
         service.log_path = Path("unused.log")
         service.reconcile_lock = threading.Lock()
+        service.reconnect_signal = threading.Event()
+        service._recovery = remote_gateway.CatchupRecovery(self.root / "catchup.json")
         service.workers = {"demo": worker}
 
         with patch.object(remote_gateway, "append_log"):
@@ -1515,7 +1560,7 @@ class StoreTests(unittest.TestCase):
                     )
                 )
 
-    def test_system_message_is_ignored_and_advances_cursor(self):
+    def test_realtime_system_message_is_ignored_without_advancing_history_cursor(self):
         with tempfile.TemporaryDirectory() as raw:
             with patch.object(remote_gateway, "REMOTE_STATE", Path(raw)):
                 store = remote_gateway.ProjectStore("demo")
@@ -1529,10 +1574,10 @@ class StoreTests(unittest.TestCase):
                         }
                     )
                 )
-                self.assertEqual(store.state["cursor"], 5)
+                self.assertEqual(store.state["cursor"], 0)
                 self.assertEqual(store.state["messages"], {})
 
-    def test_interrupted_message_is_recovered(self):
+    def test_interrupted_message_without_owner_evidence_is_not_blindly_replayed(self):
         with tempfile.TemporaryDirectory() as raw:
             with patch.object(remote_gateway, "REMOTE_STATE", Path(raw)):
                 store = remote_gateway.ProjectStore("demo")
@@ -1543,7 +1588,8 @@ class StoreTests(unittest.TestCase):
                     "status": "processing",
                 }
                 store.recover_interrupted()
-                self.assertEqual(store.state["messages"]["om_1"]["status"], "pending")
+                self.assertEqual(store.state["messages"]["om_1"]["status"], "processing")
+                self.assertEqual(store.state["messages"]["om_1"]["run_recovery"], "outcome_unknown")
 
     def test_queue_snapshot_blocks_reload_while_work_is_active(self):
         with tempfile.TemporaryDirectory() as raw:

@@ -9,6 +9,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "windowless_process.ps1")
 $EffectiveRequestOnly = $RequestOnly -or $ReportUsage -or $InspectionReport
 $TaskName = "CodexFeishuRemoteGateway"
 $Runtime = Join-Path $env:LOCALAPPDATA "CodexFeishuRemote"
@@ -50,5 +51,5 @@ if ($FirstInspectionMessage) {
 if ($InspectionReport) {
     $SyncArgs += "--inspection-report"
 }
-& $Python @SyncArgs
-exit $LASTEXITCODE
+$SyncExitCode = Invoke-WindowlessProcess -FilePath $Python -ArgumentList $SyncArgs
+exit $SyncExitCode

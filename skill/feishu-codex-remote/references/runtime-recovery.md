@@ -25,6 +25,41 @@ scope or a project's domain rules.
   create a new retry budget merely because the error text changed.
   Domain-specific review gates and model-routing budgets remain project-owned.
 
+## Native Account Reset
+
+`scripts/quota_reset.py` implements the native account command. Only an original
+user message whose complete text, after trimming outer whitespace, is exactly
+`#reset` triggers it. Extra text, altered case, attachments and bot/system
+messages do not. It runs immediately through the existing lifecycle worker,
+without a model, batching delay, main-thread fork or ordinary repair budget.
+Maintenance and exhausted model quota do not block it; graceful Listener reload
+still drains the active account operation before exiting.
+
+Use the signed-in local Codex app-server: read `account/rateLimits/read`, then
+call `account/rateLimitResetCredit/consume` with a durable per-message UUID.
+Choose the earliest unexpired `expiresAt` only when voucher details are complete;
+otherwise, including a failed details lookup, omit `creditId` and let the server
+choose. Use existing vouchers only; never buy credits, enable recharge or change
+credentials. The command uses the account currently signed in on this machine.
+
+Persist request intent before redemption and the returned result before Feishu
+delivery. Duplicate events and delivery recovery reuse the saved reply, not the
+redemption call. An interrupted/ambiguous request produces an explicit unknown
+outcome and is not automatically redeemed again; do not claim it used no voucher.
+Confirmed success remains success when refreshing usage fails. Report no-credit,
+nothing-to-reset, authentication and network outcomes in readable language.
+Only a delivered result completes the source; terminal failures use the existing
+failure reaction. Do not let generic retries turn this into another model task.
+
+**Never perform real voucher redemption in tests, maintenance checks, replay,
+release validation or demos, even when authenticated.** Use an injected fake
+account/transport; read-only voucher queries are permitted. The real exchange is
+reserved for the user's intentional live command. Keep this prohibition in both
+editions and every future test addition. `test_quota_reset.py` exercises durable
+queue/history ingestion, lifecycle dispatch, exact command filtering, selection,
+missing details, ambiguous results, duplicate/restart/delivery recovery, reload,
+reactions and the production transport guard with synthetic data only.
+
 ## Execution And Recovery Contract
 
 `scripts/task_contract.py` owns the shared generation/recovery instructions and

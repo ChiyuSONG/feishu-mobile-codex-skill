@@ -15,6 +15,7 @@ from command_invocation import exec_spec
 
 from listener_control import listener_lease
 from gateway_recovery import CatchupRecovery
+from quota_reset import QuotaResetWorker, LiveAccount, is_reset_command
 from delivery_receipts import ReplyRouting, deliver_reply, remaining_artifact_failures
 
 import argparse
@@ -136,6 +137,14 @@ def runtime_python_path(system: str | None = None) -> Path:
 
 
 def codex_rate_limits(timeout: float = 15.0) -> dict[str, Any]:
+    result = codex_account_request("account/rateLimits/read", {}, timeout)
+    rate_limits = result.get("rateLimits")
+    if not isinstance(rate_limits, dict):
+        raise GatewayError("Codex account/rateLimits/read returned no primary rate limit")
+    return rate_limits
+
+
+def codex_account_request(method: str, params: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
     process = subprocess.Popen(
         [str(codex_cli_path()), "app-server"],
         stdin=subprocess.PIPE,
@@ -197,11 +206,7 @@ def codex_rate_limits(timeout: float = 15.0) -> dict[str, Any]:
                 "capabilities": {"experimentalApi": True},
             },
         )
-        result = request(2, "account/rateLimits/read", {})
-        rate_limits = result.get("rateLimits")
-        if not isinstance(rate_limits, dict):
-            raise GatewayError("Codex account/rateLimits/read returned no primary rate limit")
-        return rate_limits
+        return request(2, method, params)
     finally:
         if process.stdin is not None:
             process.stdin.close()
@@ -565,6 +570,10 @@ class ProjectStore(RunOwnershipStore, LifecycleStore):
             self.state["updated_at"] = now_iso()
             atomic_write_json(self.path, self.state)
 
+    def _defer(self, row):
+        if not is_reset_command(row):
+            super()._defer(row)
+
     def enqueue(self, message: dict[str, Any]) -> bool:
         message_id = str(message.get("message_id") or "").strip()
         if not message_id:
@@ -640,7 +649,7 @@ class ProjectStore(RunOwnershipStore, LifecycleStore):
             if recovered:
                 return recovered
             selected, _delay = select_pending(
-                list(self.state.get("messages", {}).values()),
+                [row for row in self.state.get("messages", {}).values() if not is_reset_command(row)],
                 forced_single_message, explicit_routing_mode,
                 quiet_seconds=quiet_window_seconds, max_messages=max_messages,
                 merge_window_seconds=merge_window_seconds,
@@ -666,7 +675,7 @@ class ProjectStore(RunOwnershipStore, LifecycleStore):
             if not self.admission_open or self.pause_requested() or self.state.get("main_bootstrap_state") == "outcome_unknown":
                 return None
             selected, delay = select_pending(
-                list(self.state.get("messages", {}).values()),
+                [row for row in self.state.get("messages", {}).values() if not is_reset_command(row)],
                 forced_single_message, explicit_routing_mode,
                 parallel=parallel_message,
             )
@@ -772,7 +781,7 @@ def forced_single_message(item: dict[str, Any]) -> bool:
 
 
 def parallel_message(item: dict[str, Any]) -> bool:
-    return message_text(item.get("content")).lstrip().startswith("#")
+    return not is_reset_command(item) and message_text(item.get("content")).lstrip().startswith("#")
 
 
 def explicit_routing_mode(item: dict[str, Any]) -> str:
@@ -1498,7 +1507,7 @@ def reply_complete(
     )
 
 
-class ProjectWorker(LifecycleWorker):
+class ProjectWorker(QuotaResetWorker, LifecycleWorker):
     def lifecycle_notice_parts(self, text):
         return chunks(text)
 
@@ -1517,6 +1526,7 @@ class ProjectWorker(LifecycleWorker):
         self._worker_errors: dict[str, dict[str, str]] = {}
         self._active_main_thread: threading.Thread | None = None
         self.init_lifecycle()
+        self.init_account_commands()
         self.lifecycle_thread = None
         self.branch_thread = self._new_worker_thread("branch_dispatch", self._parallel_loop)
         self.thread = self._new_worker_thread("main", self._loop)
@@ -1637,6 +1647,9 @@ class ProjectWorker(LifecycleWorker):
             self.lifecycle_signal.set()
         return added
 
+    def live_account(self):
+        return LiveAccount(self.store, codex_account_request, REMOTE_STATE)
+
     def _archive_temporary_thread(self, thread_id: str) -> None:
         archive_thread(thread_id, codex_cli_path(), self.project["working_directory"])
 
@@ -1646,7 +1659,7 @@ class ProjectWorker(LifecycleWorker):
         parent = self.store.thread_id()
         if parent:
             return parent
-        rows = list(self.store.state.get("messages", {}).values())
+        rows = [row for row in self.store.state.get("messages", {}).values() if not is_reset_command(row)]
         active = [row for row in rows if not parallel_message(row) and row.get("status") == "processing"]
         if active:
             event_path = active[0].get("run_event_log")
@@ -1799,7 +1812,8 @@ class ProjectWorker(LifecycleWorker):
     @staticmethod
     def _terminal_failure(item):
         return item.get("status") == "failed" and (
-            int(item.get("attempts") or 0) >= 3 or item.get("branch_state") == "fork_outcome_unknown")
+            int(item.get("attempts") or 0) >= 3 or item.get("branch_state") == "fork_outcome_unknown"
+            or bool(item.get("quota_reset")))
 
     def _sync_failure_reaction(self, item):
         mid = item["message_id"]
@@ -1863,6 +1877,7 @@ class ProjectWorker(LifecycleWorker):
             try:
                 self.lifecycle_signal.wait(timeout=RETRY_SECONDS)
                 self.lifecycle_signal.clear()
+                self.process_account_commands()
                 self.deliver_lifecycle_notices()
                 self.reconcile_failure_reactions()
                 self.reconcile_branch_archives()
@@ -2515,6 +2530,13 @@ class GatewayService:
             for item in items:
                 status_name = str(item.get("status") or "unknown")
                 project_counts[status_name] = project_counts.get(status_name, 0) + 1
+                if is_reset_command(item):
+                    if status_name == "failed":
+                        terminal_failures.append({"project_key": key, "message_id": item["message_id"],
+                                                  "error": (item.get("quota_reset") or {}).get("text", "")})
+                    elif status_name == "pending":
+                        active.append({"project_key": key, "message_id": item["message_id"], "status": status_name})
+                    continue
                 attempts = int(item.get("attempts") or 0)
                 fork_unknown = item.get("branch_state") == "fork_outcome_unknown" or bootstrap_unknown
                 if status_name == "processing" or (not fork_unknown and (
@@ -2543,7 +2565,8 @@ class GatewayService:
                 for entry in snapshot["active"]
             )
             branches_running = any(self.workers[key].active_branches for key in project_keys)
-            if draining or branches_running:
+            account_running = any(getattr(self.workers[key], "account_command_active", False) for key in project_keys)
+            if draining or branches_running or account_running:
                 quiet_since = None
             elif quiet_since is None:
                 quiet_since = time.monotonic()

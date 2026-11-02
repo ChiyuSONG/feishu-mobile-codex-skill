@@ -30,14 +30,17 @@ class RecoveryTests(unittest.TestCase):
         self.worker = gateway.ProjectWorker('test', self.project, self.client, self.root / 'log')
         self.store = self.worker.store
 
-    def test_schema_reports_all_present_field_errors_and_keeps_legacy(self):
-        bad = {'status': 'incomplete', 'failed': 'not a list', 'reason': [], 'completed': [3]}
-        with self.assertRaises(contract.IncompleteTask) as result:
-            contract.validate_outcome(bad)
-        for field in ['failed', 'reason', 'completed']:
-            self.assertIn(field, str(result.exception))
-        self.assertEqual({'status': 'incomplete'}, contract.validate_outcome({'status': 'incomplete'}))
-        self.assertIsNone(contract.read_outcome(self.final()))
+    def test_malformed_quality_metadata_never_blocks_a_returned_reply(self):
+        for index, value in enumerate(('not json', '{"status":"needs_review"}', '{"failed":42}')):
+            with self.subTest(value=value):
+                mid = 'metadata-' + str(index)
+                self.enqueue(mid)
+                path = self.final('Here is the available answer, with its limitations.')
+                path.with_name('outcome.json').write_text(value, encoding='utf-8')
+                self.assertEqual((1, 1), self.process(self.store.next_pending_batch(quiet_window_seconds=0), path))
+                self.assertEqual('completed', self.store.state['messages'][mid]['status'])
+                self.assertEqual(value, path.with_name('outcome.json').read_text(encoding='utf-8'))
+
 
     def test_reply_wording_is_opaque_to_gateway_not_a_semantic_gate(self):
         # Synthetic semantic variants: only transport, not a model-review test.
@@ -59,25 +62,21 @@ class RecoveryTests(unittest.TestCase):
                 self.assertEqual(answer, send.call_args.args[3])
                 self.assertEqual("completed", self.store.state["messages"][mid]["status"])
 
-    def test_declared_omission_is_not_overridden_by_success_sounding_draft(self):
+    def test_uncertainty_is_a_normal_reply_not_an_automatic_retry(self):
         self.enqueue()
-        self.store.finish("one", "pending", attempts=2)
-        draft = "Completed the chart (preferred version)."
-        path = self.final(draft)
-        outcome = {
-            "status": "incomplete", "completed": ["Chart saved"],
-            "failed": ["Requested accessible text alternative missing"],
-            "reason": "The requested text alternative was not generated",
-            "safe_draft": draft, "next_step": "Add the missing text alternative",
-        }
-        path.with_name("outcome.json").write_text(json.dumps(outcome), encoding="utf-8")
-        self.assertEqual((1, 0), self.process(self.store.next_pending_batch(quiet_window_seconds=0), path))
-        self.assertEqual("failed", self.store.state["messages"]["one"]["status"])
-        self.worker.deliver_lifecycle_notices()
-        notice = self.client.reply_post.call_args.args[1]
-        self.assertIn(outcome["reason"], notice)
-        self.assertIn(draft, notice)
-        self.assertEqual(outcome, self.store.state["messages"]["one"]["task_outcome"])
+        answer = 'I could verify the older rubric, but cannot confirm this year. Please share the options.'
+        path = self.final(answer)
+        path.with_name('outcome.json').write_text(json.dumps({'status':'incomplete',
+            'failed':['Current source unavailable'], 'reason':'No further authorized lookup'}), encoding='utf-8')
+        with patch.object(gateway, 'reply_complete', return_value='') as send:
+            with patch.object(gateway, 'run_codex', return_value=(answer, 'main', path)) as model:
+                self.worker._process_batch(self.store.next_pending_batch(quiet_window_seconds=0))
+        model.assert_called_once()
+        self.assertEqual(answer, send.call_args.args[3])
+        self.assertEqual(1, self.store.state['messages']['one']['attempts'])
+        self.assertEqual('completed', self.store.state['messages']['one']['status'])
+        self.assertEqual([], self.store.next_pending_batch(quiet_window_seconds=0))
+
 
     def test_prior_findings_and_evidence_survive_restart_into_next_prompt(self):
         self.enqueue()
@@ -97,23 +96,30 @@ class RecoveryTests(unittest.TestCase):
                       *outcome["completed"], *outcome["failed"]]:
             self.assertIn(value, prompt)
 
-    def test_transport_and_file_have_same_validation(self):
-        path = self.final()
-        invalid = {'status': 'completed', 'evidence': 'bad'}
-        path.with_name('outcome.json').write_text(json.dumps(invalid), encoding='utf-8')
-        for call in [lambda: contract.read_outcome(path), lambda: contract.extract_transport_outcome(
-                'Reply\n<codex-task-outcome>\n' + json.dumps(invalid) + '\n</codex-task-outcome>', path)]:
-            with self.assertRaises(contract.IncompleteTask):
-                call()
+    def test_real_execution_errors_keep_existing_retry_budget(self):
+        self.enqueue()
+        with patch.object(gateway, 'run_codex', side_effect=gateway.GatewayError('temporary process failure')) as model, \
+                patch.object(gateway, 'reply_complete') as send:
+            for attempt in range(3):
+                self.worker._process_batch(self.store.next_pending_batch(quiet_window_seconds=0))
+                self.assertEqual(attempt + 1, self.store.state['messages']['one']['attempts'])
+        self.assertEqual(3, model.call_count)
+        send.assert_not_called()
+        self.assertEqual('failed', self.store.state['messages']['one']['status'])
+        self.assertEqual([], self.store.next_pending_batch(quiet_window_seconds=0))
+        failures = [v for k,v in self.store.state['lifecycle_notices'].items() if k.startswith('task-failed:')]
+        self.assertEqual(1, len(failures))
 
-    def test_failure_without_draft_explains_and_never_uses_raw_exception(self):
-        text = contract.failure_text('execution', outcome={'status': 'incomplete',
-            'draft_unavailable_reason': '没有生成可用正文'})
-        self.assertIn('没有生成可用正文', text)
-        self.assertNotIn('Traceback', text)
-        text = contract.failure_text('review', True, {'safe_draft': 'Draft only'})
-        self.assertIn('not approved', text)
-        self.assertIn('Draft only', text)
+
+    def test_runtime_failure_notice_has_no_quality_rejection_label(self):
+        for language in (False, True):
+            text = contract.failure_text('execution', language)
+            self.assertNotIn('Traceback', text)
+            self.assertNotIn('未通过审核', text)
+            self.assertNotIn('not approved', text)
+        self.assertIn('saved', contract.failure_text('delivery', True))
+        self.assertIn('不必重新执行', contract.failure_text('completion'))
+
 
     def test_terminal_failure_cross_survives_restart_and_pending_clears_it(self):
         self.reaction_client()
@@ -273,17 +279,15 @@ class RecoveryTests(unittest.TestCase):
         path.with_name('outcome.json').write_text(json.dumps({'status': 'completed', 'resolutions': [receipt]}), encoding='utf-8')
         return path, receipt, artifact
 
-    def test_original_task_resolves_only_after_bound_recovery_delivery(self):
-        self.reaction_client()
+    def test_reply_sidecar_cannot_complete_a_different_original(self):
         path, receipt, _ = self.recovery()
         self.process(self.store.next_pending_batch(quiet_window_seconds=0), path, RuntimeError('offline'))
-        self.assertEqual('failed', self.store.state['messages']['original']['status'])
         self.restart()
         self.assertEqual((0, 1), self.process(self.store.next_pending_batch(quiet_window_seconds=0), path))
-        original = self.store.state['messages']['original']
-        self.assertEqual('completed', original['status'])
-        self.assertEqual(['repair'], original['resolution']['completion_message_ids'])
-        self.assertEqual(receipt, original['resolution']['receipt'])
+        self.assertEqual('failed', self.store.state['messages']['original']['status'])
+        self.assertNotIn('resolution', self.store.state['messages']['original'])
+        self.assertEqual('completed', self.store.state['messages']['repair']['status'])
+
 
     def test_unrelated_completion_cannot_clear_old_failure(self):
         path, _, _ = self.recovery()
@@ -291,18 +295,21 @@ class RecoveryTests(unittest.TestCase):
         self.process(self.store.next_pending_batch(quiet_window_seconds=0), path)
         self.assertEqual('failed', self.store.state['messages']['original']['status'])
 
-    def test_resolution_rejects_changed_input_evidence_and_foreign_chat(self):
-        path, receipt, artifact = self.recovery()
-        rows = self.store.state['messages']
-        outcome = {'status': 'completed', 'resolutions': [receipt]}
-        for field, value in [('content', 'changed'), ('chat_id', 'another-chat'), ('status', 'pending')]:
-            changed = copy.deepcopy(rows)
-            changed['original'][field] = value
-            with self.assertRaises(contract.IncompleteTask):
-                contract.verified_resolutions(outcome, changed, ['repair'], path)
-        artifact.write_text('stale', encoding='utf-8')
-        with self.assertRaises(contract.IncompleteTask):
-            contract.verified_resolutions(outcome, rows, ['repair'], path)
+    def test_sidecar_is_not_authority_to_update_other_requests(self):
+        self.reaction_client()
+        path, _, artifact = self.recovery()
+        for field, value in [('content','changed'), ('chat_id','another-chat')]:
+            with self.subTest(field=field):
+                self.store.update_message('original', **{field:value})
+                before = copy.deepcopy(self.store.state['messages']['original'])
+                if self.store.state['messages']['repair']['status'] == 'completed':
+                    self.enqueue('repair-' + field)
+                self.process(self.store.next_pending_batch(quiet_window_seconds=0), path)
+                current = self.store.state['messages']['original']
+                for key in ('message_id', 'chat_id', 'content', 'status', 'attempts', 'task_outcome'):
+                    self.assertEqual(before.get(key), current.get(key))
+                self.assertNotIn('resolution', current)
+
 
     def test_recovery_context_preserves_original_and_committed_parts(self):
         self.recovery()
@@ -312,14 +319,15 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(['A'], context['prior_outcome']['completed'])
         self.assertEqual(contract.source_fingerprint(row), context['source_sha256'])
 
-    def test_atomic_resolution_rolls_back_all_rows(self):
-        path, receipt, _ = self.recovery()
+    def test_atomic_completion_changes_only_current_batch_and_rolls_back_on_write_error(self):
+        path, _, _ = self.recovery()
         self.store.next_pending_batch(quiet_window_seconds=0)
+        before = copy.deepcopy(self.store.state['messages'])
         with patch.object(self.store, 'save', side_effect=OSError('disk full')):
             with self.assertRaises(OSError):
-                self.store.complete_batch(['repair'], verified_resolutions={'original': receipt})
-        self.assertEqual('failed', self.store.state['messages']['original']['status'])
-        self.assertEqual('processing', self.store.state['messages']['repair']['status'])
+                self.store.complete_batch(['repair'])
+        self.assertEqual(before, self.store.state['messages'])
+
 
     def test_exit_disk_failure_leaves_maintenance_active(self):
         self.enter()
@@ -330,15 +338,17 @@ class RecoveryTests(unittest.TestCase):
         self.assertTrue(self.store.state['maintenance']['active'])
         self.assertNotIn('completion_intent', self.store.state['maintenance'])
 
-    def test_old_failure_notice_is_cancelled_after_original_resolves(self):
-        path, _, _ = self.recovery()
+    def test_old_failure_notice_is_cancelled_after_explicit_original_state_repair(self):
+        self.enqueue('original')
+        self.store.finish('original', 'failed', attempts=3)
         notice = self.store._queue_lifecycle_notice('old-failure', 'Original failed', 'original')
         notice['failure_source_ids'] = ['original']
         self.store.save()
-        self.process(self.store.next_pending_batch(quiet_window_seconds=0), path)
+        self.store.finish('original', 'completed')
         self.worker.deliver_lifecycle_notices()
         self.client.reply_post.assert_not_called()
         self.assertEqual('cancelled', self.store.state['lifecycle_notices']['old-failure']['status'])
+
 
     def test_evidence_changed_during_delivery_does_not_resolve_original(self):
         path, _, artifact = self.recovery()

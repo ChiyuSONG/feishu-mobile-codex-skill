@@ -875,7 +875,8 @@ class RoutingTests(unittest.TestCase):
             self.assertEqual(set(receipt["delivered_parts"]), {"text:0"})
             client.fail_image = False
             remote_gateway.reply_complete(*args, store=store)
-        self.assertEqual(client.events[0], ("post", answer))
+            self.assertEqual(final_path.read_text(encoding="utf-8"), answer)
+        self.assertEqual(client.events[0], ("post", "done\n\npreview"))
         self.assertEqual(client.events[1], ("image", "img_1"))
         self.assertEqual(len(client.events), 2)
 

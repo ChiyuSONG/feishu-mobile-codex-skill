@@ -44,6 +44,21 @@ def prepared_batch(first, items):
         return []
     return rows
 
+def retained_batch(first, items):
+    """Keep attempted source groups intact, without resurrecting completed work."""
+    ids = first.get('batch_message_ids')
+    if not ids:
+        return None
+    by_id = {row['message_id']: row for row in items}
+    rows = [by_id.get(mid) for mid in ids]
+    if (len(ids) != len(set(ids)) or first['message_id'] not in ids
+            or any(not row or row.get('status') not in {'pending','failed'}
+                   or row.get('batch_message_ids') != ids
+                   or int(row.get('attempts') or 0) >= 3
+                   or row.get('provider_wait') for row in rows)):
+        return []
+    return rows
+
 def select_pending(items, forced_single, routing_mode, *, now=None,
                    quiet_seconds=QUIET_WINDOW_SECONDS, max_messages=None,
                    merge_window_seconds=None, parallel=None):
@@ -54,6 +69,17 @@ def select_pending(items, forced_single, routing_mode, *, now=None,
     pending = [item for item in items if item.get("status") == "pending"
                and int(item.get("attempts") or 0) < 3]
     pending.sort(key=lambda item: (int(item.get("create_time") or 0), item["message_id"]))
+    # Once claimed, a recoverable group remains the ordered main-line unit.
+    # Legacy ungrouped failures retain their existing fallback behavior.
+    attempts = sorted((row for row in items if row.get('status') in {'pending','failed'}
+                       and row.get('batch_message_ids') and int(row.get('attempts') or 0) < 3),
+                      key=lambda row:(int(row.get('create_time') or 0),row['message_id']))
+    if attempts and (not pending or (int(attempts[0].get('create_time') or 0),attempts[0]['message_id'])
+                     <= (int(pending[0].get('create_time') or 0),pending[0]['message_id'])):
+        saved = prepared_batch(attempts[0], items)
+        if saved is not None: return saved, None
+        retained = retained_batch(attempts[0], items)
+        if retained is not None: return retained, None
     if not pending:
         failed = [item for item in items if item.get("status") == "failed"
                   and int(item.get("attempts") or 0) < 3]
@@ -62,6 +88,9 @@ def select_pending(items, forced_single, routing_mode, *, now=None,
             saved = prepared_batch(failed[0], items)
             if saved is not None:
                 return saved, None
+            retained = retained_batch(failed[0], items)
+            if retained is not None:
+                return retained, None
         return failed[:1], None
     first = pending[0]
     if first.get("provider_wait"):
@@ -69,6 +98,9 @@ def select_pending(items, forced_single, routing_mode, *, now=None,
     saved = prepared_batch(first, items)
     if saved is not None:
         return saved, None
+    retained = retained_batch(first, items)
+    if retained is not None:
+        return retained, None
     # An empty separator is a control marker, not a new model task.
     if message_text(first.get('content')).strip() == '*' and not resource_keys(first.get('content')):
         return [first], 0.0
@@ -80,6 +112,8 @@ def select_pending(items, forced_single, routing_mode, *, now=None,
         if star_barrier:
             break
         if item.get("prepared_reply") or item.get("recovered_model_result"):
+            break
+        if item.get('batch_message_ids'):
             break
         if item.get("provider_wait"):
             break

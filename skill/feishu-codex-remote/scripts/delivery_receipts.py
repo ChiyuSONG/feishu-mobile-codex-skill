@@ -43,6 +43,7 @@ class ReplyRouting:
     image_suffixes: set[str]
     file_suffixes: set[str]
     presentation: Callable | None = None
+    render_artifact_labels: Callable | None = None
 
 
 class DeliveryJournal:
@@ -218,9 +219,11 @@ def deliver_reply(client, project, item, answer: str, final_path: Path, *, store
             optional=True)
         document = prepared.get("value")
     link = ""
+    display_answer = (routing.render_artifact_labels(answer, allowed_root, artifacts)
+                      if routing.render_artifact_labels else answer)
     if document is not None:
         link = document["document_url"]
-        summary = next((line.strip("# ") for line in answer.splitlines() if line.strip()), "完整结果已整理")
+        summary = next((line.strip("# ") for line in display_answer.splitlines() if line.strip()), "完整结果已整理")
         text = f"{summary[:240]}\n\n[打开完整飞书文档]({link})"
         fallback_artifacts = document.get("artifacts") or []
         if fallback_artifacts:
@@ -231,13 +234,13 @@ def deliver_reply(client, project, item, answer: str, final_path: Path, *, store
     else:
         # The existing splitter owns boundaries and formatting; no output schema
         # or content filter is introduced by delivery bookkeeping.
-        texts = list(routing.split_text(answer))
+        texts = list(routing.split_text(display_answer))
         if not texts:
             raise GatewayError("Prepared reply contains no deliverable message")
         if wants_document and failed:
             texts[0] = "附件上传失败；以下先返回文字结果，本地产物未送达。\n\n" + texts[0]
     if routing.presentation is not None:
-        texts, failed = routing.presentation(project, answer, document, texts, failed)
+        texts, failed = routing.presentation(project, display_answer, document, texts, failed)
     parts = [{"key": "text:0", "method": "reply_post", "target": message_id,
               "content": texts[0], "uuid": base_uuid}] + media
     if failed:

@@ -61,11 +61,13 @@ Generalize the proven reminder interaction without importing project-specific he
 - When several active reminders could match “完成了” or “取消它”, ask which one rather than closing one by guess.
 - Keep reminder content scoped to the bound workstream and never copy private records from another project.
 
-## Current Release Baseline (2026-09-22)
+## Current Release Baseline (2026-11-02)
 
 | Capability | Current state |
 | --- | --- |
 | Durable ordered Feishu inbox, offline recovery, persistent Codex thread | Implemented and covered by deterministic tests |
+| Ordinary model replies | Delivered without built-in answer-quality review or outcome-file gating; infrastructure-only recovery remains |
+| Claimed groups, native reaction receipts and directory aliases | Preserve group identity on fault/restart, repair reaction state without replaying Codex, and recognize existing directory identity |
 | Missed-event reconciliation | Startup/reconnect intent is durable per group; complete history scans alone advance the cursor. Functional application PONG, control/worker supervision and native singleton ownership have isolated regression coverage; real macOS interruption testing remains |
 | Direct Feishu replies and private-document routing | Implemented; explicit in-project Markdown images are sent as native image replies and explicit PDF/Excel deliverables as native file replies after tenant verification; private documents and private-file links remain the fallback for complex content and other artifacts |
 | One-prompt installer | Skill workflow and runtime bootstrap implemented; real clean-machine/CUA onboarding not yet accepted |

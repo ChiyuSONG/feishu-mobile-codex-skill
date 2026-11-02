@@ -1,8 +1,6 @@
 from __future__ import annotations
-from task_contract import (EXECUTION_CONTRACT, IncompleteTask, failure_text,
-                           outcome_path, prepared_result, read_outcome, restore_result,
-                           extract_transport_outcome, recovery_context as original_recovery_context,
-                           verified_resolutions)
+from task_contract import (EXECUTION_CONTRACT, failure_text, prepared_result, restore_result,
+                           recovery_context as original_recovery_context, terminal_failure)
 
 from queue_batching import QUIET_WINDOW_SECONDS, select_pending, star_boundaries
 from run_ownership import RunOwnershipStore
@@ -620,11 +618,12 @@ class ProjectStore(RunOwnershipStore, LifecycleStore):
                         item["maintenance_stop_error"] = "Listener interrupted; stopping has not been confirmed"
                         changed = True
                     continue
-                elif item.get("status") in {"pending", "failed"} and self.pause_requested([item["message_id"]]):
+                elif (item.get("status") in {"pending", "failed"} and not terminal_failure(item)
+                      and int(item.get("attempts") or 0) < 3 and self.pause_requested([item["message_id"]])):
                     self._defer(item)
                     changed = True
                 elif item.get("status") == "pending" and int(item.get("attempts") or 0) >= 3:
-                    item["status"] = "failed" if int(item.get("attempts") or 0) >= 3 else "pending"
+                    item["status"] = "failed"
                     item["recovered_at"] = now_iso()
                     changed = True
             if changed:
@@ -701,20 +700,15 @@ class ProjectStore(RunOwnershipStore, LifecycleStore):
     def complete_batch(self, message_ids: list[str], **fields: Any) -> None:
         with self.lock:
             rows = self.state["messages"]
-            resolutions = fields.pop("verified_resolutions", {})
-            previous = {mid: dict(rows[mid]) for mid in [*message_ids, *resolutions]}
+            previous = {mid: dict(rows[mid]) for mid in message_ids}
             try:
                 for mid in message_ids:
                     rows[mid].update(fields, status="completed", updated_at=now_iso())
-                for mid, receipt in resolutions.items():
-                    rows[mid].update(status="completed", updated_at=now_iso(),
-                                     resolution={"completion_message_ids": list(message_ids),
-                                                 "receipt": receipt, "delivered_at": fields.get("completed_at")},
-                                     reaction_sync_error="Recovery delivered; reaction reconciliation pending")
                 self.save()
             except Exception:
                 rows.update(previous)
                 raise
+
 
     def record_run(self, message_ids: list[str], event_log: Path) -> None:
         with self.lock:
@@ -1017,7 +1011,7 @@ def run_codex(project_key: str, project: dict[str, Any], store: ProjectStore, it
         attachments,
         first_turn=not bool(thread_id),
     )
-    prompt += "\n" + EXECUTION_CONTRACT + "\nOutcome path: " + str(outcome_path(final_path))
+    prompt += "\n" + EXECUTION_CONTRACT
     if item.get("branch_thread_id"):
         prompt = (
             "本轮是井号触发的一次性旁支，只处理本条消息。继承主线快照但不改变主线归属；"
@@ -1049,7 +1043,6 @@ def run_codex(project_key: str, project: dict[str, Any], store: ProjectStore, it
     if not new_thread_id:
         raise GatewayError(f"Codex returned no persistent thread ID; log={event_log}")
     answer = final_path.read_text(encoding="utf-8").strip()
-    answer = extract_transport_outcome(answer, final_path)
     if not answer:
         raise GatewayError("Codex returned an empty final answer")
     return answer, new_thread_id, final_path
@@ -1124,6 +1117,24 @@ def extract_local_artifacts(answer: str, working_directory: str | Path) -> list[
             seen.add(key)
             artifacts.append(candidate)
     return artifacts
+
+
+def render_local_artifact_labels(answer: str, working_directory, artifacts: list[Path]) -> str:
+    """Native attachments own local media; keep captions without broken local links.
+
+    Only recognized project artifacts are rewritten. Remote links, ordinary text
+    and the original answer/document source remain unchanged. A frozen delivery
+    plan is replayed as saved and never retroactively rewritten.
+    """
+    known = {os.path.normcase(str(path.resolve())) for path in artifacts
+             if path.suffix.lower() in IMAGE_ARTIFACT_SUFFIXES | NATIVE_MESSAGE_FILE_SUFFIXES}
+    def render(match):
+        candidates = extract_local_artifacts(match.group(0), working_directory)
+        if not candidates or os.path.normcase(str(candidates[0])) not in known:
+            return match.group(0)
+        label = re.match(r"!?\[([^\]\r\n]*)\]", match.group(0)).group(1)
+        return label or candidates[0].name
+    return MARKDOWN_LINK_RE.sub(render, answer)
 
 
 def chunks(text: str, limit: int = 3000) -> list[str]:
@@ -1502,7 +1513,7 @@ def reply_complete(
         routing=ReplyRouting(
             extract_local_artifacts, lambda source, text, _project: should_publish_document(source, text),
             publish_with_log, chunks, IMAGE_ARTIFACT_SUFFIXES, NATIVE_MESSAGE_FILE_SUFFIXES,
-            presentation=reply_presentation,
+            presentation=reply_presentation, render_artifact_labels=render_local_artifact_labels,
         ),
     )
 
@@ -1518,6 +1529,7 @@ class ProjectWorker(QuotaResetWorker, LifecycleWorker):
         self.log_path = log_path
         self.store = ProjectStore(key)
         self.store.recover_interrupted()
+        self.reaction_lock = threading.RLock()
         self.signal = threading.Event()
         self.branch_signal = threading.Event()
         self.active_branches: dict[str, threading.Thread] = {}
@@ -1811,9 +1823,8 @@ class ProjectWorker(QuotaResetWorker, LifecycleWorker):
 
     @staticmethod
     def _terminal_failure(item):
-        return item.get("status") == "failed" and (
-            int(item.get("attempts") or 0) >= 3 or item.get("branch_state") == "fork_outcome_unknown"
-            or bool(item.get("quota_reset")))
+        return terminal_failure(item)
+
 
     def _sync_failure_reaction(self, item):
         mid = item["message_id"]
@@ -1880,6 +1891,7 @@ class ProjectWorker(QuotaResetWorker, LifecycleWorker):
                 self.process_account_commands()
                 self.deliver_lifecycle_notices()
                 self.reconcile_failure_reactions()
+                self.reconcile_reactions(dirty_only=True)
                 self.reconcile_branch_archives()
                 self._worker_ready("lifecycle")
             except Exception as exc:
@@ -1900,66 +1912,81 @@ class ProjectWorker(QuotaResetWorker, LifecycleWorker):
         return str(((payload.get("data") or {}).get("reaction_id")) or "").strip()
 
     def _start_working_reaction(self, item: dict[str, Any]) -> str:
-        message_id = item["message_id"]
-        if item.get("failure_reaction_active") or item.get("reaction_sync_error"):
-            self._sync_failure_reaction(item)
-        existing = str(item.get("working_reaction_id") or "").strip()
-        if existing and item.get("working_reaction_active"):
-            return existing
-        payload = self.client.add_reaction(message_id, WORKING_REACTION)
-        reaction_id = self._reaction_id(payload)
-        if not reaction_id:
-            raise GatewayError(f"Feishu returned no reaction_id for {WORKING_REACTION}")
-        self.store.update_message(
-            message_id,
-            working_reaction_id=reaction_id,
-            working_reaction_type=WORKING_REACTION,
-            working_reaction_active=True,
-            working_reaction_at=now_iso(),
-            reaction_sync_error=None,
-        )
-        return reaction_id
+        with self.reaction_lock:
+            message_id = item["message_id"]
+            if item.get("failure_reaction_active") or item.get("reaction_sync_error"):
+                self._sync_failure_reaction(item)
+            existing = str(item.get("working_reaction_id") or "").strip()
+            if existing and item.get("working_reaction_active"):
+                return existing
+            payload = self.client.add_reaction(message_id, WORKING_REACTION)
+            reaction_id = self._reaction_id(payload)
+            if not reaction_id:
+                raise GatewayError(f"Feishu returned no reaction_id for {WORKING_REACTION}")
+            # Preserve the already-applied remote receipt even if its local commit fails.
+            try:
+                self.store.update_message(
+                    message_id, working_reaction_id=reaction_id,
+                    working_reaction_type=WORKING_REACTION, working_reaction_active=True,
+                    working_reaction_at=now_iso(), reaction_sync_error=None)
+            except Exception as exc:
+                with self.store.lock:
+                    self.store.state["messages"][message_id].update(
+                        working_reaction_id=reaction_id, working_reaction_active=True,
+                        reaction_sync_error="Reaction receipt persistence failed: " + str(exc))
+                append_log(self.log_path, f"working reaction receipt retained for {message_id}: {exc}")
+            return reaction_id
+
 
     def _clear_working_reaction(self, message_id: str, reaction_id: str) -> str | None:
-        if not reaction_id:
-            return None
-        try:
-            self.client.remove_reaction(message_id, reaction_id)
-            self.store.update_message(
-                message_id,
-                working_reaction_active=False,
-                working_reaction_cleared_at=now_iso(),
-                reaction_sync_error=None,
-            )
-            return None
-        except Exception as exc:
-            error = str(exc)
-            self.store.update_message(message_id, reaction_sync_error=error)
-            append_log(self.log_path, f"working reaction cleanup failed for {message_id}: {error}")
-            return error
+        with self.reaction_lock:
+            try:
+                with self.store.lock:
+                    current = dict(self.store.state["messages"][message_id])
+                reaction_id = reaction_id or str(current.get("working_reaction_id") or "")
+                # A missing receipt is unknown, never proof that no Typing exists.
+                ids = {reaction_id} if reaction_id else {
+                    str(r.get("reaction_id") or "") for r in self._own_reactions(message_id, WORKING_REACTION)}
+                for rid in ids - {""}:
+                    self.client.remove_reaction(message_id, rid)
+                self.store.update_message(
+                    message_id,
+                    working_reaction_active=False,
+                    working_reaction_cleared_at=now_iso(),
+                    reaction_sync_error=None,
+                )
+                return None
+            except Exception as exc:
+                error = str(exc)
+                self.store.update_message(message_id, reaction_sync_error=error)
+                append_log(self.log_path, f"working reaction cleanup failed for {message_id}: {error}")
+                return error
+
 
     def _replace_working_with_completion(self, message_id: str, reaction_id: str) -> str | None:
-        cleanup_error = self._clear_working_reaction(message_id, reaction_id)
-        if cleanup_error:
-            return cleanup_error
-        try:
-            payload = self.client.add_reaction(message_id, COMPLETION_REACTION)
-            completion_id = self._reaction_id(payload)
-            if not completion_id:
-                raise GatewayError(f"Feishu returned no reaction_id for {COMPLETION_REACTION}")
-            self.store.update_message(
-                message_id,
-                completion_reaction_id=completion_id,
-                completion_reaction_type=COMPLETION_REACTION,
-                completion_reaction_at=now_iso(),
-                reaction_sync_error=None,
-            )
-            return None
-        except Exception as exc:
-            error = str(exc)
-            self.store.update_message(message_id, reaction_sync_error=error)
-            append_log(self.log_path, f"completion reaction failed for {message_id}: {error}")
-            return error
+        with self.reaction_lock:
+            cleanup_error = self._clear_working_reaction(message_id, reaction_id)
+            if cleanup_error:
+                return cleanup_error
+            try:
+                payload = self.client.add_reaction(message_id, COMPLETION_REACTION)
+                completion_id = self._reaction_id(payload)
+                if not completion_id:
+                    raise GatewayError(f"Feishu returned no reaction_id for {COMPLETION_REACTION}")
+                self.store.update_message(
+                    message_id,
+                    completion_reaction_id=completion_id,
+                    completion_reaction_type=COMPLETION_REACTION,
+                    completion_reaction_at=now_iso(),
+                    reaction_sync_error=None,
+                )
+                return None
+            except Exception as exc:
+                error = str(exc)
+                self.store.update_message(message_id, reaction_sync_error=error)
+                append_log(self.log_path, f"completion reaction failed for {message_id}: {error}")
+                return error
+
 
     def _own_reactions(self, message_id: str, emoji_type: str) -> list[dict[str, Any]]:
         return [
@@ -1969,11 +1996,15 @@ class ProjectWorker(QuotaResetWorker, LifecycleWorker):
             and str((item.get("operator") or {}).get("operator_id") or "") == self.client.app_id
         ]
 
-    def reconcile_reactions(self) -> None:
+    def reconcile_reactions(self, dirty_only=False) -> None:
         with self.store.lock:
             items = [dict(item) for item in self.store.state.get("messages", {}).values()]
         for item in items:
             status = str(item.get("status") or "")
+            if dirty_only and not (item.get("reaction_sync_error") or
+                    item.get("working_reaction_active") or
+                    status == "completed" and not item.get("completion_reaction_id")):
+                continue
             if status == "processing" or status == "ignored":
                 continue
             if item.get("control_action") == "flush_previous_batch":
@@ -1988,40 +2019,50 @@ class ProjectWorker(QuotaResetWorker, LifecycleWorker):
             message_id = str(item.get("message_id") or "")
             if not message_id:
                 continue
-            try:
-                self._sync_failure_reaction(item)
-                typing = self._own_reactions(message_id, WORKING_REACTION)
-                for reaction in typing:
-                    reaction_id = str(reaction.get("reaction_id") or "")
-                    if reaction_id:
-                        self.client.remove_reaction(message_id, reaction_id)
-                if typing:
-                    self.store.update_message(
-                        message_id,
-                        working_reaction_active=False,
-                        working_reaction_cleared_at=now_iso(),
-                    )
-                checks = self._own_reactions(message_id, COMPLETION_REACTION)
-                if status == "completed" and not checks:
-                    payload = self.client.add_reaction(message_id, COMPLETION_REACTION)
-                    completion_id = self._reaction_id(payload)
-                    if completion_id:
-                        self.store.update_message(
-                            message_id,
-                            completion_reaction_id=completion_id,
-                            completion_reaction_type=COMPLETION_REACTION,
-                            completion_reaction_at=now_iso(),
-                            reaction_sync_error=None,
-                        )
-                elif status != "completed":
-                    for reaction in checks:
+            with self.reaction_lock:
+                with self.store.lock:
+                    item = dict(self.store.state["messages"][message_id])
+                status = str(item.get("status") or "")
+                if status in ("processing", "ignored"):
+                    continue
+                try:
+                    self._sync_failure_reaction(item)
+                    typing = self._own_reactions(message_id, WORKING_REACTION)
+                    for reaction in typing:
                         reaction_id = str(reaction.get("reaction_id") or "")
                         if reaction_id:
                             self.client.remove_reaction(message_id, reaction_id)
-                self.store.update_message(message_id, reaction_sync_error=None, working_reaction_active=False)
-            except Exception as exc:
-                self.store.update_message(message_id, reaction_sync_error=str(exc))
-                append_log(self.log_path, f"reaction reconciliation failed for {message_id}: {exc}")
+                    if typing:
+                        self.store.update_message(
+                            message_id,
+                            working_reaction_active=False,
+                            working_reaction_cleared_at=now_iso(),
+                        )
+                    checks = self._own_reactions(message_id, COMPLETION_REACTION)
+                    if status == "completed":
+                        completion_id = str((checks[0] if checks else {}).get("reaction_id") or "")
+                        if not completion_id:
+                            payload = self.client.add_reaction(message_id, COMPLETION_REACTION)
+                            completion_id = self._reaction_id(payload)
+                        if not completion_id:
+                            raise GatewayError("Completion reaction has no remote receipt")
+                        if completion_id:
+                            self.store.update_message(
+                                message_id,
+                                completion_reaction_id=completion_id,
+                                completion_reaction_type=COMPLETION_REACTION,
+                                completion_reaction_at=now_iso(),
+                                reaction_sync_error=None,
+                            )
+                    elif status != "completed":
+                        for reaction in checks:
+                            reaction_id = str(reaction.get("reaction_id") or "")
+                            if reaction_id:
+                                self.client.remove_reaction(message_id, reaction_id)
+                    self.store.update_message(message_id, reaction_sync_error=None, working_reaction_active=False)
+                except Exception as exc:
+                    self.store.update_message(message_id, reaction_sync_error=str(exc))
+                    append_log(self.log_path, f"reaction reconciliation failed for {message_id}: {exc}")
 
     def _process(self, item: dict[str, Any]) -> None:
         self._process_batch([item])
@@ -2036,7 +2077,7 @@ class ProjectWorker(QuotaResetWorker, LifecycleWorker):
         reply_item = combined_batch_item(items)
         working_reactions: dict[str, str] = {}
         phase = "attachments"
-        outcome = None
+        result_receipt = None
         try:
             if self.store.pause_requested(message_ids):
                 raise MaintenancePaused("System upgrade; original request retained")
@@ -2067,18 +2108,14 @@ class ProjectWorker(QuotaResetWorker, LifecycleWorker):
                 answer, thread_id, final_path = run_codex_batch(
                     self.key, self.project, self.store, items, attachments
                 )
+            result_receipt = prepared_result(answer, thread_id, final_path, message_ids)
             if parallel_message(items[0]):
                 self.store.update_message(items[0]["message_id"], branch_thread_id=thread_id)
             else:
                 self.store.set_thread_id(thread_id)
-            phase = "review"
-            outcome = read_outcome(final_path)
+            # A returned reply is opaque to the bridge, including caveats and questions.
             for message_id in message_ids:
-                self.store.update_message(message_id, task_outcome=outcome, last_final_path=str(final_path))
-            if outcome and outcome.get("status") == "incomplete":
-                raise IncompleteTask("Requested work remains incomplete; see retained outcome")
-            with self.store.lock:
-                resolutions = verified_resolutions(outcome, self.store.state["messages"], message_ids, final_path)
+                self.store.update_message(message_id, last_final_path=str(final_path))
             receipt = prepared_result(answer, thread_id, final_path, message_ids)
             with self.store.lock:
                 for message_id in message_ids:
@@ -2101,11 +2138,9 @@ class ProjectWorker(QuotaResetWorker, LifecycleWorker):
             answer_sha256 = hashlib.sha256(answer.encode("utf-8")).hexdigest()
             completed_at = now_iso()
             with self.store.lock:
-                resolutions = verified_resolutions(outcome, self.store.state["messages"], message_ids, final_path)
                 self.store.complete_batch(
                     message_ids, completed_at=completed_at, answer_sha256=answer_sha256,
                     document_link=document_link, batch_message_ids=message_ids,
-                    verified_resolutions=resolutions,
                     reply_source_message_id=reply_item["message_id"])
             for item in items:
                 message_id = str(item["message_id"])
@@ -2120,6 +2155,13 @@ class ProjectWorker(QuotaResetWorker, LifecycleWorker):
                 f"completed {self.key}:{','.join(message_ids)}; thread={thread_id}",
             )
         except Exception as exc:
+            if result_receipt is not None:
+                # Keep a returned reply through metadata/commit faults. The existing
+                # failure/defer commit persists it; recovery never calls Codex again.
+                with self.store.lock:
+                    for mid in message_ids:
+                        if self.store.state["messages"][mid].get("status") != "completed":
+                            self.store.state["messages"][mid].setdefault("prepared_reply", result_receipt)
             if isinstance(exc, MaintenanceStopFailed):
                 for message_id in message_ids:
                     self.store.update_message(message_id, maintenance_stop_error=str(exc))
@@ -2159,13 +2201,6 @@ class ProjectWorker(QuotaResetWorker, LifecycleWorker):
                 return
             trace = traceback.format_exc()
             append_log(self.log_path, f"failed {self.key}:{','.join(message_ids)}: {trace}")
-            if phase == "review" and recovered_result:
-                # Preserve final/outcome/run evidence, but allow the existing
-                # failed-task path to continue unfinished work next attempt.
-                with self.store.lock:
-                    for message_id in message_ids:
-                        self.store.state["messages"][message_id].pop("recovered_model_result", None)
-                    self.store.save()
             failed_at = now_iso()
             terminal = False
             for item in items:
@@ -2187,7 +2222,7 @@ class ProjectWorker(QuotaResetWorker, LifecycleWorker):
                 if attempts >= 3:
                     terminal = True
             if terminal:
-                text = failure_text(phase, self.project.get("language") == "en", outcome)
+                text = failure_text(phase, self.project.get("language") == "en")
                 if isinstance(exc, ProviderFailureError):
                     text += "\n" + provider_failure_reason(exc.kind, self.project.get("language") == "en")
                 key = "task-failed:" + hashlib.sha256("\0".join(message_ids).encode()).hexdigest()

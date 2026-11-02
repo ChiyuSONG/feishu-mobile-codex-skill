@@ -16,7 +16,7 @@ import uuid
 
 from gateway_common import message_text
 from gateway_lifecycle import timestamp as now_iso
-from task_contract import extract_transport_outcome, prepared_result, restore_result
+from task_contract import prepared_result, restore_result
 
 
 def _windows_snapshot(pid):
@@ -153,7 +153,6 @@ def finished_result(record):
     answer = final_path.read_text(encoding="utf-8").strip()
     if not answer:
         raise ValueError("empty_final_artifact")
-    answer = extract_transport_outcome(answer, final_path)
     return prepared_result(answer, thread_id, final_path, record["message_ids"])
 
 

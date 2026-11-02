@@ -60,68 +60,50 @@ queue/history ingestion, lifecycle dispatch, exact command filtering, selection,
 missing details, ambiguous results, duplicate/restart/delivery recovery, reload,
 reactions and the production transport guard with synthetic data only.
 
-## Execution And Recovery Contract
+## Reply Delivery And Infrastructure Recovery
 
-`scripts/task_contract.py` owns the shared generation/recovery instructions and
-result receipt format. `run_codex` loads this contract for every run; project
-prompts reference it rather than maintaining competing copies. Applicable domain
-criteria remain project-owned; do not install another reviewer or nutrition rules.
-For existing project reviewers, forward criteria, evidence and prior findings
-together. Distinguish objective invariants from flexible semantic judgments.
+The base path is receive -> call Codex -> deliver its reply. The gateway does
+not score answer quality, require a reviewer, request outcome.json, or infer
+success/failure from answer wording. Clarifying questions, caveats and partial
+answers are normal replies. A delivered CheckMark means that the reply arrived;
+it does not certify completion of every underlying business action. Any domain
+review belongs to the selected project's own instructions and implementation.
 
-Codex plans compound work inside its turn. The gateway preserves source order,
-not a new intent classifier or separate model call per subtask. A partial result
-uses the supplied per-run `outcome.json`: completed, failed, dependency-blocked
-work, evidence, readable cause and next step. Recovery receives the prior result;
-incomplete tasks retain the existing attempt budget and get no completion mark.
-Fully completed replies need no extra receipt or review call. This is an execution
-report, not independent proof: the Agent must verify effects with project tools.
-Restricted agents can use the transport fallback defined in `task_contract.py`;
-the gateway removes its control block before delivery. Do not broaden permissions
-just to save an outcome receipt.
+Legacy outcome files and literal outcome markup do not control generation,
+recovery or delivery. Historical records remain diagnostic evidence; a new reply
+cannot use its sidecar to mark another original complete. The read-only
+recovery-context command still retrieves only explicitly selected originals,
+source fingerprints and retained execution evidence from the bound inbox.
 
-Before network delivery, the store saves the output, source batch and hash.
-Delivery-only recovery reuses the output without another model turn; new messages
-cannot merge into that prepared reply. Completion is committed for the whole batch
-before best-effort reaction updates; late failures cannot downgrade it. Terminal
-failure notices use the durable lifecycle outbox and the last source-message anchor.
-The user sees the failed phase, known completed/unfinished/blocked portions and
-next step. Say when the detailed cause is unknown instead of inventing one.
-Optional safe drafts are labeled unapproved; raw exceptions stay local.
+Actual infrastructure, process, attachment, persistence and delivery errors use
+the existing bounded recovery policy. Native provider deferrals retain their
+existing separate behavior below. No quality-triggered rerun or model escalation
+is added. Account Reset remains the separate human-only command above.
 
-`OUTCOME_FIELDS` in `task_contract.py` is the source for prompt field types and
-both file/transport validation. Present malformed fields are reported together;
-legacy receipts may omit optional fields. Do not force ordinary successful
-answers into a new schema or add a model call merely to validate transport.
-If a usable safe draft does not exist, explain that via
-`draft_unavailable_reason`; never copy raw logs into user-facing failure text.
+A claimed source group remains the same recovery unit after a fault, maintenance
+or restart. Keep its member order and last-message reply anchor, preserve used
+attempts, and do not merge new arrivals into it. Model retries receive retained
+execution evidence so already-applied effects can be checked before continuing.
 
-For an explicitly requested repair of a different failed message, use the local
-read-only `recovery-context --project-key <key> --message-id <original>` command.
-It reads only specified originals from that registered inbox, including their
-source fingerprint and prior completed effects. Do not scan sibling projects or
-turn historical findings into new requirements. The optional `resolutions` field
-is defined by `task_contract.py`; bind each claim to the unchanged original and
-current verification artifacts. The original becomes completed only after the
-repair's final result is delivered and the linked state change is committed.
-Unrelated successes, a code fix alone, or a stale test log never resolve it.
-These checks establish provenance and integrity, not independent semantic truth:
-actual effects and any required domain review remain the project's responsibility.
+Before network delivery, save the exact output, original source group and hash.
+Retain an already-returned reply through a local metadata commit fault as part
+of the existing failure/defer commit; it must not trigger another model call.
+Delivery-only recovery reuses that reply and the frozen send plan without another
+model call. Completion is committed for the source group before best-effort
+reaction updates; cleanup errors cannot downgrade delivered replies. Terminal
+infrastructure failures use one durable lifecycle notice per original group.
+Raw diagnostics stay local; the notice identifies the failed technical phase.
 
-Terminal failures project `CrossMark`; pending/provider-wait/maintenance states
-do not. Remove the failure mark on requeue, and replace it with `CheckMark` only
-after verified original-task recovery and delivery. Persist reaction receipts;
-reconcile missing/error receipts after restart without repeating completed work.
-Main and branch failures use the existing lifecycle outbox with stable identity.
-Cancel an unsent failure notice when its original is no longer failed.
+Typing and completion use remote receipts. A missing local Typing receipt is
+queried before adding a completion mark. If cleanup fails, retain a dirty state;
+the existing lifecycle cycle repairs it without rerunning Codex. Remote reaction
+IO uses its own lock rather than holding the intake state lock. If a completion
+mark exists remotely, recover its receipt instead of adding another mark.
 
-Background work without a source message uses the same Listener-owned outbox,
-not a fabricated source ID or a second state writer. The internal `task-notice
---project-key <key> --key <stable-run-identity> --text-file <safe-text>` command
-persists a request; it reports queued, not delivered. Omit `--message-id` for
-background notices. Keep existing schedules, notification preferences and domain
-behavior unchanged. Never include raw exceptions or private diagnostics in the
-text file. Notification failure alone must not be called business-task failure.
+Background notices still use the same Listener-owned task-notice outbox. Queued
+is not delivered. Preserve stable notification identities, per-part receipts,
+project notification settings, and the existing schedule. Notification failure
+alone does not imply that the underlying business action failed.
 
 ## Native Provider Failures
 
@@ -151,11 +133,10 @@ macOS libproc start identity and Linux boot/start identity distinguish PID reuse
 
 An exact live child retains ownership. A stopped original with a verified native
 completion, matching thread and nonempty final artifact may resume the existing
-review/delivery path without another model turn. This is saved as
-`recovered_model_result`, not a review-approved `prepared_reply`. An incomplete
-result preserves its evidence and resumes the existing execution path and budget;
-it must not become a permanent delivery-only retry. A verified prepared reply follows
-the same path. Only a durable claim known not to have submitted a model may resume
+reply-delivery path without another model turn. This is saved as
+`recovered_model_result` and becomes a `prepared_reply` when its source binding and
+output integrity are saved; no answer-quality or outcome-file gate applies. A
+verified prepared reply follows the same path. Only a durable claim known not to have submitted a model may resume
 execution. Missing or ambiguous identity/terminal evidence remains outcome-unknown
 for diagnosis; do not manufacture success or blindly replay effects. Main/branch
 identity and maintenance ownership remain intact. Closed admission may safely
@@ -235,8 +216,8 @@ case catalog rather than creating a parallel policy or testing framework.
 - Hard checks cover objective transport/state invariants, such as receipt types,
   source identity and artifact integrity. Synonyms, explanatory labels and item
   meaning belong to an existing project semantic reviewer, not a new keyword,
-  alias or item-count veto in the gateway. Retain both equivalent-expression
-  positives and genuinely incomplete/conflicting negatives. Transport tests
+  alias or item-count veto in the gateway. Retain equivalent-expression, clarification and uncertainty cases as normal
+  delivery tests. Real runtime faults remain recovery negatives. Transport tests
   establish lossless handoff, not semantic correctness.
 - For a real failure, retain the original input and relevant pre-run state in the
   project's private test assets: source order, grouping/entrypoint, attachments,
@@ -281,7 +262,7 @@ python -m unittest discover -s scripts -p "test_*.py"
 | Checkpoint/communication exceptions, stop failure, real hidden child reaping and subsequent execution | `test_gateway_lifecycle.py` |
 | Partial result, prepared reply replay, late failure, acceptance evidence and notification receipts | `test_task_contract.py` |
 | Failure reactions, schema errors, original-task resolution, no-source notices, crash/restart and stale evidence | `test_generic_recovery.py` |
-| Wording-preserving delivery, declared omissions and prior review handoff (transport only) | `test_generic_recovery.py` |
+| Opaque replies, legacy-metadata compatibility and infrastructure-only recovery | `test_generic_recovery.py` |
 | Listener death with live child, PID reuse, ambiguous outcome, retained final, main/branch and maintenance | `test_run_ownership.py` |
 | Terminal model network/routing/authentication classification and native subprocess replay | `test_provider_failure.py`, `test_provider_transport_failure.py`, `test_provider_worker_recovery.py` |
 | Partial reply receipts, lost local completion, media/document/fallback and restart without model replay | `test_delivery_receipts.py` |

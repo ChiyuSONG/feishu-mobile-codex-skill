@@ -192,46 +192,25 @@ class RunOwnershipTests(unittest.TestCase):
         model.assert_not_called()
         send.assert_called_once()
 
-    def test_native_completion_still_runs_existing_outcome_review_before_delivery(self):
+    def test_native_completed_reply_recovers_without_quality_gate_or_model_replay(self):
         record = self.orphan("partial")
         worker = self.worker()
         self.release(record)
-        gateway.outcome_path(Path(record["final_path"])).write_text(
-            json.dumps({"status": "incomplete", "failed": ["unfinished synthetic check"]}), encoding="utf-8")
+        sidecar = Path(record["final_path"]).with_name('outcome.json')
+        sidecar.write_text(json.dumps({"status":"incomplete", "failed":["Unverified optional detail"]}), encoding='utf-8')
         worker.store.reconcile_runs()
         batch = worker.store.next_pending_batch()
-        self.assertEqual(len(batch), 1)
-        with patch.object(gateway, "run_codex", side_effect=AssertionError("duplicate model")) as model, \
-                patch.object(gateway, "reply_complete", side_effect=AssertionError("unreviewed delivery")) as send:
+        self.assertEqual(1, len(batch))
+        expected = Path(record['final_path']).read_text(encoding='utf-8').strip()
+        with patch.object(gateway, 'run_codex', side_effect=AssertionError('duplicate model')) as model, \
+                patch.object(gateway, 'reply_complete', return_value='') as send:
             worker._process_batch(batch)
         model.assert_not_called()
-        send.assert_not_called()
-        self.assertEqual(worker.store.state["messages"]["one"]["status"], "failed")
-        self.assertEqual(worker.store.state["messages"]["one"]["task_outcome"]["status"], "incomplete")
-        self.assertNotIn("prepared_reply", worker.store.state["messages"]["one"])
-        self.assertNotIn("recovered_model_result", worker.store.state["messages"]["one"])
-        original_final = Path(record["final_path"])
-        self.assertTrue(original_final.exists())
-        final = self.root / "continued-run" / "final.md"
-        final.parent.mkdir()
-        final.write_text("finished remaining work", encoding="utf-8")
-
-        def continue_model(key, project, store, item, attachments):
-            self.assertEqual(item["task_outcome"]["status"], "incomplete")
-            prompt = gateway.build_prompt(key, project, item, attachments, first_turn=False)
-            self.assertIn("unfinished synthetic check", prompt)
-            self.assertIn(json.dumps(str(original_final)), prompt)
-            return "finished remaining work", "main-original", final
-
-        with patch.object(gateway, "run_codex", side_effect=continue_model) as model, \
-                patch.object(gateway, "reply_complete", return_value="") as send:
-            worker._process_batch(worker.store.next_pending_batch())
-        model.assert_called_once()
-        self.assertEqual(worker.store.state["messages"]["one"]["status"], "completed",
-                         worker.store.state["messages"]["one"].get("error"))
         send.assert_called_once()
-        self.assertEqual(worker.store.state["messages"]["one"]["status"], "completed")
-        self.assertEqual(worker.store.state["messages"]["one"]["attempts"], 2)
+        self.assertEqual(expected, send.call_args.args[3])
+        self.assertEqual('completed', worker.store.state['messages']['one']['status'])
+        self.assertEqual('incomplete', json.loads(sidecar.read_text(encoding='utf-8'))['status'])
+
 
     def test_partial_native_terminal_and_wrong_thread_do_not_authorize_result(self):
         final = self.root / "final.md"

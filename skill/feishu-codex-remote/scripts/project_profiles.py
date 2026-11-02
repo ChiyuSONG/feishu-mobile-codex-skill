@@ -20,7 +20,11 @@ def source_task_profile(thread_id, working_directory, *, database=None):
         raise GatewayError("Cannot read source task configuration; confirm the missing remote profile fields")
     with closing(sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
         row = conn.execute("SELECT rollout_path,cwd FROM threads WHERE id=?", (thread_id,)).fetchone()
-    if not row or os.path.normcase(str(Path(row[1]).resolve())) != os.path.normcase(str(Path(working_directory).resolve())):
+    try:
+        same_directory = bool(row) and os.path.samefile(row[1], working_directory)
+    except (OSError, ValueError):
+        same_directory = False
+    if not same_directory:
         raise GatewayError("Source task does not match the selected working directory")
     context = None
     with Path(row[0]).open(encoding="utf-8") as handle:

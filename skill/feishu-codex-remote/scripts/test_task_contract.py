@@ -7,7 +7,7 @@ import unittest
 
 import gateway_lifecycle as lifecycle
 import remote_gateway as gateway
-from task_contract import read_outcome, restore_result, prepared_result, extract_transport_outcome
+from task_contract import restore_result, prepared_result
 import test_gateway_lifecycle as fixtures
 
 class TransactionTests(unittest.TestCase):
@@ -39,6 +39,29 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual((0, 1), self.process(batch, path))
         self.assertEqual("completed", self.store.state["messages"]["one"]["status"])
 
+    def test_result_survives_metadata_commit_fault_without_model_replay(self):
+        self.enqueue()
+        path = self.final('Already generated reply')
+        batch = self.store.next_pending_batch(quiet_window_seconds=0)
+        produced, faulted = [False], [False]
+        real_save = self.store.save
+        def produce(*args):
+            produced[0] = True
+            return path.read_text(encoding='utf-8'), 'main', path
+        def save():
+            if produced[0] and not faulted[0]:
+                faulted[0] = True
+                raise OSError('synthetic metadata commit interrupted after model reply')
+            return real_save()
+        with patch.object(gateway, 'run_codex', side_effect=produce) as model, \
+                patch.object(self.store, 'save', side_effect=save):
+            self.worker._process_batch(batch)
+        self.assertEqual(1, model.call_count)
+        self.worker = gateway.ProjectWorker('test', self.project, self.client, self.root / 'log')
+        self.store = self.worker.store
+        self.assertEqual((0,1), self.process(self.store.next_pending_batch(quiet_window_seconds=0), path))
+        self.assertEqual('completed', self.store.state['messages']['one']['status'])
+
     def test_batch_delivery_preserves_last_anchor_and_members(self):
         self.enqueue("a")
         self.enqueue("b")
@@ -58,24 +81,19 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual("completed", self.store.state["messages"]["one"]["status"])
         self.assertNotIn("error", self.store.state["messages"]["one"])
 
-    def test_incomplete_work_is_not_delivered_as_success_and_preserves_evidence(self):
+    def test_clarification_reply_delivers_once_despite_legacy_incomplete_receipt(self):
         self.enqueue()
-        path = self.final("Partial result")
-        outcome = {"status": "incomplete", "completed": ["A committed"], "failed": ["B"],
-                   "blocked": ["C needs B"], "reason": "A required value is missing",
-                   "next_step": "Confirm the value", "evidence": ["result.txt"]}
-        path.with_name("outcome.json").write_text(json.dumps(outcome), encoding="utf-8")
-        for _ in range(3):
-            batch = self.store.next_pending_batch(quiet_window_seconds=0)
-            self.assertEqual((1, 0), self.process(batch, path))
-        self.assertEqual("failed", self.store.state["messages"]["one"]["status"])
-        self.assertEqual(outcome, self.store.state["messages"]["one"]["task_outcome"])
-        self.worker.deliver_lifecycle_notices()
-        message = self.client.reply_post.call_args.args[1]
-        self.assertIn("A committed", message)
-        self.assertIn("C needs B", message)
-        self.assertNotIn("Traceback", message)
+        path = self.final("Please confirm which document you mean.")
+        outcome = {"status": "incomplete", "failed": ["Missing clarification"]}
+        sidecar = path.with_name("outcome.json")
+        sidecar.write_text(json.dumps(outcome), encoding="utf-8")
+        self.assertEqual((1, 1), self.process(self.store.next_pending_batch(quiet_window_seconds=0), path))
+        self.assertEqual("completed", self.store.state["messages"]["one"]["status"])
+        self.assertEqual(1, self.store.state["messages"]["one"]["attempts"])
+        self.assertEqual(outcome, json.loads(sidecar.read_text(encoding="utf-8")))
         self.assertEqual([], self.store.next_pending_batch(quiet_window_seconds=0))
+        self.assertFalse(self.store.state.get("lifecycle_notices"))
+
 
     def test_terminal_failure_notice_retries_without_business_call(self):
         self.enqueue()
@@ -165,14 +183,19 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(["processing", "processing"],
                          [self.store.state["messages"][mid]["status"] for mid in ["a", "b"]])
 
-    def test_restricted_agent_can_report_outcome_without_extra_write_permission(self):
-        text = 'Partial answer\n<codex-task-outcome>\n{"status":"incomplete","failed":["B"]}\n</codex-task-outcome>'
-        path = self.final(text)
-        self.assertEqual("Partial answer", extract_transport_outcome(text, path))
-        self.assertEqual("Partial answer", path.read_text(encoding="utf-8"))
-        self.assertEqual(["B"], read_outcome(path)["failed"])
-        with self.assertRaises(gateway.GatewayError):
-            extract_transport_outcome("Bad <codex-task-outcome> raw", path)
+    def test_reply_with_literal_or_malformed_old_control_markup_is_delivered_unchanged(self):
+        for index, text in enumerate((
+                'Example: <codex-task-outcome> is ordinary text.',
+                'Partial reply\n<codex-task-outcome>\n{"status":"incomplete"}\n</codex-task-outcome>',
+                'Bad <codex-task-outcome> raw')):
+            with self.subTest(text=text):
+                mid = 'literal-' + str(index)
+                self.enqueue(mid)
+                path = self.final(text)
+                self.assertEqual((1, 1), self.process(self.store.next_pending_batch(quiet_window_seconds=0), path))
+                self.assertEqual(text, self.worker.store.state['messages'][mid]['prepared_reply']['answer'])
+                self.assertEqual('completed', self.store.state['messages'][mid]['status'])
+
 
 if __name__ == "__main__":
     unittest.main()
